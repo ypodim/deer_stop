@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Detection Review</title>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 20px; }
+    h1 { color: #4af; margin-bottom: 4px; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #4af; text-decoration: none; margin-right: 16px; }
+    .clips { display: flex; flex-wrap: wrap; gap: 16px; }
+    .clip { background: #222; border-radius: 8px; padding: 12px; width: 280px; }
+    .clip video { width: 100%; border-radius: 4px; }
+    .clip-class { font-weight: bold; color: #4f4; font-size: 1.1em; margin: 8px 0 4px; }
+    .clip-info { font-size: 0.8em; color: #888; margin-bottom: 8px; }
+    .btn { display: block; border: none; padding: 8px; border-radius: 4px;
+           cursor: pointer; width: 100%; margin-top: 4px; text-align: center;
+           text-decoration: none; box-sizing: border-box; font-size: 0.9em; }
+    .btn-primary { background: #4af; color: #000; }
+    .btn-primary:hover { background: #6cf; }
+    .empty { color: #666; font-style: italic; margin-top: 20px; }
+    #count { color: #888; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Detection Review</h1>
+  <nav>
+    <a href="/">&#9654; Live Stream</a>
+    <a href="/review">&#9744; Review</a>
+  </nav>
+  <p id="count"></p>
+  <div id="content">Loading...</div>
+  <script>
+    async function load() {
+      const res = await fetch('/clips');
+      const clips = await res.json();
+      const pending = clips.filter(c => !c.reviewed);
+      document.getElementById('count').textContent =
+        pending.length + ' unreviewed detection' + (pending.length !== 1 ? 's' : '');
+      const el = document.getElementById('content');
+      if (pending.length === 0) {
+        el.innerHTML = '<p class="empty">No unreviewed detections.</p>';
+        return;
+      }
+      el.innerHTML = '<div class="clips">' + pending.map(c => {
+        const dt = new Date(c.timestamp).toLocaleString();
+        const pct = (c.confidence * 100).toFixed(0);
+        const id = encodeURIComponent(c.id);
+        return `<div class="clip" id="clip-${c.id}">
+          <video controls preload="metadata" src="/clips/files/${id}.mp4"></video>
+          <div class="clip-class">${c.class_name}</div>
+          <div class="clip-info">${dt}<br>Confidence: ${pct}%</div>
+          <button class="btn btn-primary" onclick="markReviewed('${c.id}')">&#10003; Mark Reviewed</button>
+        </div>`;
+      }).join('') + '</div>';
+    }
+
+    async function markReviewed(id) {
+      await fetch('/clips/' + encodeURIComponent(id) + '/review', {method: 'POST'});
+      const el = document.getElementById('clip-' + id);
+      if (el) el.remove();
+      const remaining = document.querySelectorAll('.clip').length;
+      document.getElementById('count').textContent =
+        remaining + ' unreviewed detection' + (remaining !== 1 ? 's' : '');
+      if (remaining === 0)
+        document.getElementById('content').innerHTML = '<p class="empty">No unreviewed detections.</p>';
+    }
+
+    load();
+  </script>
+</body>
+</html>
