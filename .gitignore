@@ -1,0 +1,8 @@
+one.py
+._*
+*.log
+deer.mp4
+__pycache__/
+*.pyc
+reviews.json
+clips/

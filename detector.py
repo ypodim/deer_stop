@@ -2,12 +2,14 @@
 
 import csv
 import os
+import subprocess
 import sys
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -15,8 +17,29 @@ from hailo_platform import (
     HEF, VDevice, HailoStreamInterface, ConfigureParams,
     InputVStreamParams, OutputVStreamParams, FormatType, InferVStreams,
 )
+from sort import Sort
 
 import reviews as reviews_mod
+
+_TZ_PST = ZoneInfo("America/Los_Angeles")
+
+
+def _transcode(src: Path):
+    """Re-encode a clip to H.264 in a background thread so the detector isn't stalled."""
+    tmp = src.with_suffix(".tmp.mp4")
+    t0 = time.monotonic()
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(src), "-c:v", "libx264",
+         "-preset", "fast", "-crf", "23", str(tmp)],
+        capture_output=True,
+    )
+    elapsed = time.monotonic() - t0
+    if result.returncode == 0:
+        tmp.replace(src)
+        print(f"Transcode done in {elapsed:.1f}s: {src.name}")
+    else:
+        tmp.unlink(missing_ok=True)
+        print(f"ffmpeg transcode failed for {src} ({elapsed:.1f}s): {result.stderr.decode()}")
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +47,7 @@ import reviews as reviews_mod
 # ---------------------------------------------------------------------------
 
 COCO_CLASSES = {
-    "person": 0,
+    "person": 100,
     "bicycle": 1,
     "car": 0,
     "motorcycle": 1,
@@ -205,12 +228,13 @@ class ClipRecorder:
     RECORDING = "recording"
 
     def __init__(self, clips_dir: Path, fps: float, width: int, height: int,
-                 pre_roll: float = 3.0, post_roll: float = 5.0):
+                 pre_roll: float = 3.0, post_roll: float = 5.0, max_duration: float = 120.0):
         self.clips_dir = clips_dir
         self.fps = max(fps, 1.0)
         self.width = width
         self.height = height
         self.post_roll = post_roll
+        self.max_duration = max_duration
 
         self.state = self.IDLE
         self._pre_buf: deque = deque(maxlen=max(1, int(self.fps * pre_roll)))
@@ -218,6 +242,7 @@ class ClipRecorder:
         self._clip_id: str | None = None
         self._clip_path: Path | None = None
         self._thumb_path: Path | None = None
+        self._start_time: float = 0.0
         self._last_det_time: float = 0.0
         self._best_conf: float = 0.0
         self._best_class: str | None = None
@@ -240,6 +265,8 @@ class ClipRecorder:
             if not self._thumb_saved:
                 cv2.imwrite(str(self._thumb_path), frame)
                 self._thumb_saved = True
+            if now - self._start_time >= self.max_duration:
+                return self._close()
             if det_class is not None:
                 self._last_det_time = now
                 if det_conf > self._best_conf:
@@ -262,6 +289,7 @@ class ClipRecorder:
         self._clip_id = f"{ts}_{class_name}"
         self._clip_path = self.clips_dir / f"{self._clip_id}.mp4"
         self._thumb_path = self.clips_dir / f"{self._clip_id}.jpg"
+        self._start_time = now
         self._last_det_time = now
         self._best_conf = conf
         self._best_class = class_name
@@ -280,13 +308,14 @@ class ClipRecorder:
         self._writer.release()
         self._writer = None
         self.state = self.IDLE
+        threading.Thread(target=_transcode, args=(self._clip_path,), daemon=True).start()
         return {
             "id": self._clip_id,
             "path": str(self._clip_path),
             "thumb": str(self._thumb_path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "class_name": self._best_class,
-            "confidence": round(self._best_conf, 4),
+            "confidence": round(float(self._best_conf), 4),
             "reviewed": False,
         }
 
@@ -310,7 +339,7 @@ def preprocess(frame: np.ndarray, input_height: int, input_width: int) -> tuple:
 def _log_detection(class_name, class_id, conf, x1, y1, x2, y2):
     if _csv_writer is None:
         return
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(_TZ_PST).isoformat()
     with _csv_lock:
         _csv_writer.writerow([ts, class_name, class_id, f"{conf:.4f}",
                               f"{x1:.1f}", f"{y1:.1f}", f"{x2:.1f}", f"{y2:.1f}"])
@@ -350,7 +379,7 @@ def postprocess(outputs: dict, scale_info: tuple, conf_thresh: float) -> list:
             x2 = max(0, min((x2_norm * input_w - pad_w) / scale, orig_w))
             y2 = max(0, min((y2_norm * input_h - pad_h) / scale, orig_h))
 
-            print(f"  {class_name} ({class_id}): {conf:.2f}  {x2-x1:.0f}x{y2-y1:.0f}")
+            # print(f"  {class_name} ({class_id}): {conf:.2f}  {x2-x1:.0f}x{y2-y1:.0f}")
 
             if COCO_CLASSES.get(class_name, 0) == 100:
                 _log_detection(class_name, class_id, conf, x1, y1, x2, y2)
@@ -360,13 +389,26 @@ def postprocess(outputs: dict, scale_info: tuple, conf_thresh: float) -> list:
     return boxes
 
 
+def _iou(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> float:
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter == 0.0:
+        return 0.0
+    return inter / ((ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter)
+
+
 def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
     for det in detections:
-        x1, y1, x2, y2, conf, class_id = det
+        x1, y1, x2, y2, conf, class_id = det[:6]
+        track_id = int(det[6]) if len(det) > 6 else None
         x1, y1, x2, y2, class_id = int(x1), int(y1), int(x2), int(y2), int(class_id)
         color = ((class_id * 41) % 255, (class_id * 72) % 255, (class_id * 113) % 255)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        label = f"{COCO_NAMES[class_id]}: {conf:.2f}"
+        label = COCO_NAMES[class_id]
+        if track_id is not None:
+            label += f" #{track_id}"
+        label += f": {conf:.2f}"
         label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - label_size[1] - 4), (x1 + label_size[0], y1), color, -1)
         cv2.putText(frame, label, (x1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -382,7 +424,7 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
     """Blocking inference loop. Intended to run in a daemon thread."""
     global _csv_writer
 
-    source = args.source if args.source is not None else getattr(args, "video", None)
+    source = args.source
     kind = _source_type(source)
 
     # Set up CSV detection log
@@ -421,8 +463,9 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         clips_dir = Path(args.clips_dir)
         recorder = ClipRecorder(
             clips_dir, fps, width, height,
-            pre_roll=args.pre_roll, post_roll=args.post_roll,
+            pre_roll=args.pre_roll, post_roll=args.post_roll, max_duration=args.max_clip,
         )
+        tracker = Sort(max_age=5, min_hits=1, iou_threshold=0.3)
 
         try:
             with network_group.activate():
@@ -451,6 +494,24 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                         outputs = pipeline.infer(input_dict)
 
                         detections = postprocess(outputs, scale_info, args.conf)
+
+                        # Run SORT tracker; recover class_id by IoU-matching back to raw detections
+                        sort_in = np.array([[*d[:5]] for d in detections], dtype=float) \
+                                  if detections else np.empty((0, 5))
+                        tracked = tracker.update(sort_in)
+                        tracked_dets = []
+                        for trk in tracked:
+                            tx1, ty1, tx2, ty2, tid = trk
+                            best_iou, best_det = 0.0, None
+                            for det in detections:
+                                iou = _iou(tx1, ty1, tx2, ty2, *det[:4])
+                                if iou > best_iou:
+                                    best_iou, best_det = iou, det
+                            if best_det is not None:
+                                x1, y1, x2, y2, conf, class_id = best_det[:6]
+                                tracked_dets.append([x1, y1, x2, y2, conf, class_id, int(tid)])
+                        detections = tracked_dets
+
                         annotated = draw_detections(frame.copy(), detections)
                         frame_buffer.update(annotated)
 
@@ -462,9 +523,9 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                                 if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100]
                         if high:
                             best = max(high, key=lambda d: d[4])
-                            clip_info = recorder.push(frame, COCO_NAMES[int(best[5])], best[4])
+                            clip_info = recorder.push(annotated, COCO_NAMES[int(best[5])], best[4])
                         else:
-                            clip_info = recorder.push(frame)
+                            clip_info = recorder.push(annotated)
 
                         if clip_info is not None:
                             reviews_mod.add(reviews_path, reviews_lock, clip_info)

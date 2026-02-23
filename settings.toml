@@ -1,0 +1,21 @@
+[server]
+port = 8080
+
+[source]
+# Uncomment one of the following to set the video source.
+# If url is omitted, the USB webcam (/dev/video0) is used.
+url = "rtsp://admin:tahfug-zatgoz-2kIgvo@192.168.1.241:554/h264Preview_01_sub"
+# url = "/home/pol/ws/deerstop/deer.mp4"
+loop = false  # Loop video file (ignored for webcam/RTSP)
+
+[model]
+hef = "/home/pol/ws/deerstop/yolov11m.hef"
+conf = 0.6  # Detection confidence threshold (0.0–1.0)
+
+[recording]
+log = "detections.log"
+clips_dir = "/home/pol/ws/deerstop/clips"
+reviews = "reviews.json"
+pre_roll = 3.0    # Seconds of footage to keep before a detection
+post_roll = 5.0   # Seconds to keep recording after the last detection
+max_clip = 30.0  # Maximum clip length in seconds; clip is saved and a new one starts
