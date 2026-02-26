@@ -1,0 +1,15 @@
+[Unit]
+Description=Deerstop wildlife camera detection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pol
+WorkingDirectory=/home/pol/ws/deerstop
+ExecStart=/media/pol/pond/ws/deerstop_compile/venv/bin/python stream_yolo.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
