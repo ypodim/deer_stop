@@ -23,13 +23,16 @@
 <body>
   <nav><a href="/review">&#9744; Review</a></nav>
   <div id="stats">
-    <div>CPU &nbsp;&nbsp;<span id="cpu">--</span>%</div>
-    <div id="row-gpu-util" style="display:none">GPU &nbsp;&nbsp;<span id="gpu_util">--</span>%</div>
-    <div id="row-gpu-mem" style="display:none">VRAM &nbsp;<span id="gpu_mem">--</span></div>
-    <div id="row-hailo" style="display:none">Hailo &nbsp;<span id="hailo">--</span>%</div>
-    <div id="row-hailo-fps" style="display:none">H.FPS &nbsp;<span id="hailo_fps">--</span></div>
-    <div>Tile/s <span id="tile_fps">--</span></div>
-    <div>Frame &nbsp;<span id="frame_ms">--</span> ms</div>
+    <div>Res &nbsp;&nbsp;&nbsp;<span id="stream_res">--</span></div>
+    <div>Tiles &nbsp;&nbsp;<span id="n_tiles">--</span></div>
+    <div>FPS &nbsp;&nbsp;&nbsp;<span id="stream_fps">--</span></div>
+    <div>CPU &nbsp;&nbsp;&nbsp;<span id="cpu">--</span>%</div>
+    <div id="row-gpu-util" style="display:none">GPU &nbsp;&nbsp;&nbsp;<span id="gpu_util">--</span>%</div>
+    <div id="row-gpu-mem" style="display:none">VRAM &nbsp;&nbsp;<span id="gpu_mem">--</span></div>
+    <div id="row-hailo" style="display:none">Hailo &nbsp;&nbsp;<span id="hailo">--</span>%</div>
+    <div id="row-hailo-fps" style="display:none">H.FPS &nbsp;&nbsp;<span id="hailo_fps">--</span></div>
+    <div>Tile/s &nbsp;<span id="tile_fps">--</span></div>
+    <div>Frame &nbsp;&nbsp;<span id="frame_ms">--</span> ms</div>
   </div>
   <img id="stream" src="/stream" alt="Live stream">
   <script>
@@ -39,6 +42,13 @@
       try {
         const r = await fetch('/stats');
         const s = await r.json();
+        if (s.stream_res) document.getElementById('stream_res').textContent = s.stream_res;
+        if (s.n_tiles !== undefined) {
+          const n = s.n_tiles;
+          document.getElementById('n_tiles').textContent = n > 0 ? `${n}+1` : '1 (full)';
+        }
+        if (s.stream_fps !== null && s.stream_fps !== undefined)
+          document.getElementById('stream_fps').textContent = fmt(s.stream_fps, 1);
         document.getElementById('cpu').textContent = fmt(s.cpu_percent, 1);
         const hasGpu = s.gpu_util_percent !== undefined && s.gpu_util_percent !== null;
         show('row-gpu-util', hasGpu);

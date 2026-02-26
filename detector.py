@@ -553,13 +553,31 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         )
         tracker = Sort(max_age=5, min_hits=1, iou_threshold=0.3)
 
+        n_crop_tiles = len(sample_tiles) if args.tile_overlap > 0 else 0
+        if stats_monitor is not None:
+            stats_monitor.update({
+                "stream_res": f"{proc_w}x{proc_h}",
+                "n_tiles": n_crop_tiles,
+            })
+
         _EMA_ALPHA = 0.1
         _ema_tile_fps: float | None = None
         _ema_frame_ms: float | None = None
+        _ema_stream_fps: float | None = None
+        _prev_loop_t: float | None = None
 
         try:
             while not stop_event.is_set():
                 start = time.time()
+
+                _t_now = time.monotonic()
+                if _prev_loop_t is not None:
+                    _dt = _t_now - _prev_loop_t
+                    if _dt > 0:
+                        _raw_sfps = 1.0 / _dt
+                        _ema_stream_fps = (_EMA_ALPHA * _raw_sfps + (1 - _EMA_ALPHA) * _ema_stream_fps
+                                           if _ema_stream_fps is not None else _raw_sfps)
+                _prev_loop_t = _t_now
 
                 ret, frame = cap.read()
                 if not ret:
@@ -613,6 +631,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                         **backend.get_hw_stats(),
                         "tile_fps": round(_ema_tile_fps, 1),
                         "frame_ms": round(_ema_frame_ms, 1),
+                        "stream_fps": round(_ema_stream_fps, 1) if _ema_stream_fps is not None else None,
                     })
 
                 # Log priority-100 detections with frame-space coordinates
