@@ -24,27 +24,40 @@
   <nav><a href="/review">&#9744; Review</a></nav>
   <div id="stats">
     <div>CPU &nbsp;&nbsp;<span id="cpu">--</span>%</div>
-    <div>Hailo &nbsp;<span id="hailo">--</span>%</div>
-    <div>H.FPS &nbsp;<span id="fps">--</span></div>
+    <div id="row-gpu-util" style="display:none">GPU &nbsp;&nbsp;<span id="gpu_util">--</span>%</div>
+    <div id="row-gpu-mem" style="display:none">VRAM &nbsp;<span id="gpu_mem">--</span></div>
+    <div id="row-hailo" style="display:none">Hailo &nbsp;<span id="hailo">--</span>%</div>
+    <div id="row-hailo-fps" style="display:none">H.FPS &nbsp;<span id="hailo_fps">--</span></div>
     <div>Tile/s <span id="tile_fps">--</span></div>
     <div>Frame &nbsp;<span id="frame_ms">--</span> ms</div>
   </div>
   <img id="stream" src="/stream" alt="Live stream">
   <script>
+    function fmt(v, digits) { return v !== null && v !== undefined ? v.toFixed(digits) : '--'; }
+    function show(id, visible) { document.getElementById(id).style.display = visible ? '' : 'none'; }
     async function updateStats() {
       try {
         const r = await fetch('/stats');
         const s = await r.json();
-        document.getElementById('cpu').textContent =
-          s.cpu_percent !== null ? s.cpu_percent.toFixed(1) : '--';
-        document.getElementById('hailo').textContent =
-          s.hailo_device_util !== null ? s.hailo_device_util.toFixed(1) : '--';
-        document.getElementById('fps').textContent =
-          s.hailo_fps !== null ? s.hailo_fps.toFixed(1) : '--';
-        document.getElementById('tile_fps').textContent =
-          s.tile_fps !== null ? s.tile_fps.toFixed(1) : '--';
-        document.getElementById('frame_ms').textContent =
-          s.frame_ms !== null ? s.frame_ms.toFixed(0) : '--';
+        document.getElementById('cpu').textContent = fmt(s.cpu_percent, 1);
+        const hasGpu = s.gpu_util_percent !== undefined && s.gpu_util_percent !== null;
+        show('row-gpu-util', hasGpu);
+        show('row-gpu-mem', hasGpu);
+        if (hasGpu) {
+          document.getElementById('gpu_util').textContent = fmt(s.gpu_util_percent, 0);
+          const used = s.gpu_mem_used_mb !== null ? Math.round(s.gpu_mem_used_mb) + 'MB' : '--';
+          const total = s.gpu_mem_total_mb !== null ? Math.round(s.gpu_mem_total_mb / 1024) + 'GB' : '';
+          document.getElementById('gpu_mem').textContent = total ? `${used}/${total}` : used;
+        }
+        const hasHailo = s.hailo_device_util !== undefined && s.hailo_device_util !== null;
+        show('row-hailo', hasHailo);
+        show('row-hailo-fps', hasHailo);
+        if (hasHailo) {
+          document.getElementById('hailo').textContent = fmt(s.hailo_device_util, 1);
+          document.getElementById('hailo_fps').textContent = fmt(s.hailo_fps, 1);
+        }
+        document.getElementById('tile_fps').textContent = fmt(s.tile_fps, 1);
+        document.getElementById('frame_ms').textContent = fmt(s.frame_ms, 0);
       } catch (_) {}
     }
     updateStats();
