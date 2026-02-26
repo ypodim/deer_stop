@@ -29,6 +29,7 @@ import stats
 import web
 
 SETTINGS_PATH = Path(__file__).parent / "settings.toml"
+LOCAL_SETTINGS_PATH = Path(__file__).parent / "settings.local.toml"
 
 DEFAULTS = {
     "server":    {"port": 8080},
@@ -45,6 +46,17 @@ DEFAULTS = {
 }
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge override into base, section by section."""
+    merged = {**base}
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = {**merged[k], **v}
+        else:
+            merged[k] = v
+    return merged
+
+
 def load_settings() -> SimpleNamespace:
     cfg = {}
     if SETTINGS_PATH.exists():
@@ -52,6 +64,10 @@ def load_settings() -> SimpleNamespace:
             cfg = tomllib.load(f)
     else:
         print(f"No settings.toml found at {SETTINGS_PATH}, using defaults")
+    if LOCAL_SETTINGS_PATH.exists():
+        with open(LOCAL_SETTINGS_PATH, "rb") as f:
+            cfg = _deep_merge(cfg, tomllib.load(f))
+        print(f"Loaded local overrides from {LOCAL_SETTINGS_PATH.name}")
 
     def get(section, key):
         return cfg.get(section, {}).get(key, DEFAULTS[section][key])

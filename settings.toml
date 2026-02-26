@@ -2,11 +2,11 @@
 port = 8080
 
 [source]
-# Uncomment one of the following to set the video source.
+# Set url in settings.local.toml (gitignored).
+# Supported values:
+#   url = "rtsp://user:pass@host/path"
+#   url = "/path/to/video.mp4"
 # If url is omitted, the USB webcam (/dev/video0) is used.
-url = "rtsp://admin:tahfug-zatgoz-2kIgvo@192.168.1.241:554/h264Preview_01_sub"
-# url = "rtsp://user:pass@camera/stream_main"
-# url = "/home/pol/ws/deerstop/deer.mp4"
 loop = false  # Loop video file (ignored for webcam/RTSP)
 
 [model]
