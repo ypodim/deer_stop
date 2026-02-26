@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YOLO detection on Hailo with MJPEG streaming and clip review.
+YOLO detection with MJPEG streaming and clip review.
 
 Configure via settings.toml in the same directory.
 
@@ -21,11 +21,11 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         sys.exit("tomllib not found; upgrade to Python 3.11+ or: pip install tomli")
 
-import tornado.autoreload
 import tornado.ioloop
 
 import detector
 import reviews
+import stats
 import web
 
 SETTINGS_PATH = Path(__file__).parent / "settings.toml"
@@ -33,14 +33,14 @@ SETTINGS_PATH = Path(__file__).parent / "settings.toml"
 DEFAULTS = {
     "server":    {"port": 8080},
     "source":    {"loop": False},
-    "model":     {"hef": str(Path(__file__).parent / "yolov11m.hef"), "conf": 0.5},
+    "model":     {"model": str(Path(__file__).parent / "yolov11m.hef"), "conf": 0.5, "tile_overlap": 0.0, "batch_size": 1},
     "recording": {
         "log":          "detections.log",
         "clips_dir":    str(Path(__file__).parent / "clips"),
         "reviews":      "reviews.json",
         "pre_roll":     3.0,
         "post_roll":    5.0,
-        "max_clip":     120.0,
+        "max_clip":     30.0,
     },
 }
 
@@ -56,15 +56,17 @@ def load_settings() -> SimpleNamespace:
     def get(section, key):
         return cfg.get(section, {}).get(key, DEFAULTS[section][key])
 
-    hef = get("model", "hef")
-    if not Path(hef).exists():
-        sys.exit(f"Error: HEF file not found: {hef}")
+    model = get("model", "model")
+    if not Path(model).exists():
+        sys.exit(f"Error: Model file not found: {model}")
 
     return SimpleNamespace(
         source    = cfg.get("source", {}).get("url", None),
         loop      = get("source", "loop"),
-        hef       = hef,
-        conf      = get("model", "conf"),
+        model        = model,
+        conf         = get("model", "conf"),
+        tile_overlap = get("model", "tile_overlap"),
+        batch_size   = get("model", "batch_size"),
         port      = get("server", "port"),
         log       = get("recording", "log"),
         clips_dir = get("recording", "clips_dir"),
@@ -88,16 +90,17 @@ def main():
     reviews.prune(reviews_path, reviews_lock)
 
     frame_buffer = detector.FrameBuffer()
+    stats_store = stats.StatsStore()
 
     stop_event = threading.Event()
     det_thread = threading.Thread(
         target=detector.run,
-        args=(frame_buffer, stop_event, args, reviews_path, reviews_lock),
+        args=(frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store),
         daemon=True,
     )
     det_thread.start()
 
-    app = web.make_app(frame_buffer, reviews_path, reviews_lock, clips_dir, templates_dir)
+    app = web.make_app(frame_buffer, reviews_path, reviews_lock, clips_dir, templates_dir, stats_store)
     app.listen(args.port)
 
     print(f"Stream:  http://localhost:{args.port}")
@@ -105,7 +108,6 @@ def main():
     print("Press Ctrl+C to stop")
 
     try:
-        tornado.autoreload.start()
         tornado.ioloop.IOLoop.current().start()
     except KeyboardInterrupt:
         print("\nStopping...")

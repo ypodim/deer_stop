@@ -53,6 +53,15 @@ class ClipsHandler(tornado.web.RequestHandler):
         self.write(json.dumps(data))
 
 
+class StatsHandler(tornado.web.RequestHandler):
+    def initialize(self, stats_monitor):
+        self._monitor = stats_monitor
+
+    def get(self):
+        self.set_header("Content-Type", "application/json")
+        self.write(json.dumps(self._monitor.get()))
+
+
 class ClipReviewHandler(tornado.web.RequestHandler):
     def initialize(self, reviews_path, reviews_lock):
         self._reviews_path = reviews_path
@@ -70,7 +79,7 @@ class ClipReviewHandler(tornado.web.RequestHandler):
 
 
 def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
-             clips_dir: Path, templates_dir: Path) -> tornado.web.Application:
+             clips_dir: Path, templates_dir: Path, stats_monitor) -> tornado.web.Application:
     shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock)
     return tornado.web.Application(
         [
@@ -80,6 +89,7 @@ def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
             (r"/clips", ClipsHandler, shared),
             (r"/clips/(.+)/review", ClipReviewHandler, shared),
             (r"/clips/files/(.*)", tornado.web.StaticFileHandler, {"path": str(clips_dir)}),
+            (r"/stats", StatsHandler, {"stats_monitor": stats_monitor}),
         ],
         template_path=str(templates_dir),
     )

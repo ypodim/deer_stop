@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# Must be set before hailo_platform is imported so the runtime registers with
+# the hailortcli monitor daemon.
+os.environ.setdefault("HAILO_MONITOR", "1")
+
 import cv2
 import numpy as np
 from hailo_platform import (
@@ -19,6 +23,7 @@ from hailo_platform import (
 )
 from sort import Sort
 
+import monitor
 import reviews as reviews_mod
 
 _TZ_PST = ZoneInfo("America/Los_Angeles")
@@ -56,7 +61,7 @@ COCO_CLASSES = {
     "train": 0,
     "truck": 0,
     "boat": 1,
-    "traffic light": 1,
+    "traffic light": 0,
     "fire hydrant": 1,
     "stop sign": 1,
     "parking meter": 1,
@@ -336,6 +341,68 @@ def preprocess(frame: np.ndarray, input_height: int, input_width: int) -> tuple:
     return padded, (scale, pad_w, pad_h, orig_w, orig_h)
 
 
+def _tile_positions(length: int, tile: int, step: int) -> list[int]:
+    """1-D start positions for tiles covering [0, length)."""
+    if length <= tile:
+        return [0]
+    positions = list(range(0, length - tile, step))
+    if not positions or positions[-1] + tile < length:
+        positions.append(length - tile)
+    return positions
+
+
+def make_tiles(frame: np.ndarray, tile_size: int, overlap: float) -> list[tuple]:
+    """Split frame into overlapping tile_size×tile_size crops.
+
+    Returns list of (tile_img, x_offset, y_offset).
+    Edge tiles are zero-padded when the frame is smaller than tile_size.
+    """
+    h, w = frame.shape[:2]
+    step = max(1, int(tile_size * (1 - overlap)))
+    tiles = []
+    for y in _tile_positions(h, tile_size, step):
+        for x in _tile_positions(w, tile_size, step):
+            crop = frame[y:y + tile_size, x:x + tile_size]
+            ch, cw = crop.shape[:2]
+            if ch < tile_size or cw < tile_size:
+                padded = np.full((tile_size, tile_size, 3), 114, dtype=np.uint8)
+                padded[:ch, :cw] = crop
+                crop = padded
+            else:
+                crop = np.ascontiguousarray(crop)
+            tiles.append((crop, x, y))
+    return tiles
+
+
+def _compute_downscale(frame_w: int, frame_h: int,
+                       tile_size: int, overlap: float,
+                       max_tiles: int) -> tuple[int, int]:
+    """Return (w, h) scaled down so that make_tiles produces at most max_tiles.
+
+    If the frame already fits within the limit, the original dimensions are returned.
+    Uses binary search over the scale factor to find the largest resolution that
+    still satisfies the constraint.
+    """
+    step = max(1, int(tile_size * (1 - overlap)))
+
+    def n_tiles(w, h):
+        return (len(_tile_positions(w, tile_size, step)) *
+                len(_tile_positions(h, tile_size, step)))
+
+    if n_tiles(frame_w, frame_h) <= max_tiles:
+        return frame_w, frame_h
+
+    lo, hi = 0.0, 1.0
+    for _ in range(30):
+        mid = (lo + hi) / 2
+        if n_tiles(max(1, int(frame_w * mid)), max(1, int(frame_h * mid))) <= max_tiles:
+            lo = mid
+        else:
+            hi = mid
+
+    return max(1, int(frame_w * lo)), max(1, int(frame_h * lo))
+
+
 def _log_detection(class_name, class_id, conf, x1, y1, x2, y2):
     if _csv_writer is None:
         return
@@ -381,12 +448,26 @@ def postprocess(outputs: dict, scale_info: tuple, conf_thresh: float) -> list:
 
             # print(f"  {class_name} ({class_id}): {conf:.2f}  {x2-x1:.0f}x{y2-y1:.0f}")
 
-            if COCO_CLASSES.get(class_name, 0) == 100:
-                _log_detection(class_name, class_id, conf, x1, y1, x2, y2)
-
             boxes.append([x1, y1, x2, y2, conf, class_id])
 
     return boxes
+
+
+def nms(detections: list, iou_threshold: float = 0.5) -> list:
+    """Greedy NMS — removes duplicates from overlapping tiles."""
+    if len(detections) <= 1:
+        return detections
+    detections = sorted(detections, key=lambda d: d[4], reverse=True)
+    kept = []
+    while detections:
+        best = detections.pop(0)
+        kept.append(best)
+        detections = [
+            d for d in detections
+            if _iou(best[0], best[1], best[2], best[3],
+                    d[0],    d[1],    d[2],    d[3]) < iou_threshold
+        ]
+    return kept
 
 
 def _iou(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> float:
@@ -420,7 +501,7 @@ def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
-        reviews_path: Path, reviews_lock: threading.Lock):
+        reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None):
     """Blocking inference loop. Intended to run in a daemon thread."""
     global _csv_writer
 
@@ -437,12 +518,15 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                               "x1", "y1", "x2", "y2"])
         csv_file.flush()
 
-    print(f"Loading HEF: {args.hef}")
-    hef = HEF(str(args.hef))
+    print(f"Loading HEF: {args.model}")
+    hef = HEF(str(args.model))
     input_vstream_infos = hef.get_input_vstream_infos()
+    output_vstream_infos = hef.get_output_vstream_infos()
 
     input_shape = input_vstream_infos[0].shape
     input_height, input_width = input_shape[0], input_shape[1]
+    input_name = input_vstream_infos[0].name
+    output_name = output_vstream_infos[0].name
     print(f"Model input: {input_width}x{input_height}")
 
     with VDevice() as device:
@@ -450,6 +534,10 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         network_group = device.configure(hef, configure_params)[0]
         input_vstreams_params = InputVStreamParams.make(network_group, format_type=FormatType.UINT8)
         output_vstreams_params = OutputVStreamParams.make(network_group, format_type=FormatType.FLOAT32)
+
+        # Internal Hailo hardware monitor — publishes device utilization and FPS
+        # into the shared stats store so the web UI can display them.
+        _hailo_mon = monitor.StatsMonitor()
 
         cap = open_source(source)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -460,17 +548,43 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         label = source_label(source)
         print(f"Source: {label} ({width}x{height} @ {fps:.2f} FPS)")
 
+        # Scale frame down if needed so tile count stays within the batch budget.
+        max_tiles = args.batch_size - 1  # reserve one slot for the full-frame pass
+        if args.tile_overlap > 0:
+            proc_w, proc_h = _compute_downscale(
+                width, height, input_height, args.tile_overlap, max_tiles,
+            )
+            if proc_w != width or proc_h != height:
+                print(f"Downscale: {width}x{height} → {proc_w}x{proc_h} "
+                      f"to keep tiles ≤ {max_tiles}")
+        else:
+            proc_w, proc_h = width, height
+
+        if args.tile_overlap > 0:
+            sample_tiles = make_tiles(
+                np.zeros((proc_h, proc_w, 3), dtype=np.uint8),
+                input_height, args.tile_overlap,
+            )
+            n_total = len(sample_tiles) + 1  # tiles + full-frame
+            print(f"Tiling: {len(sample_tiles)} tiles + 1 full-frame = {n_total} inferences/frame "
+                  f"({input_height}×{input_width}, {args.tile_overlap:.0%} overlap, batch={args.batch_size})")
+        else:
+            print(f"Single-pass: 1 inference/frame (batch={args.batch_size})")
+
         clips_dir = Path(args.clips_dir)
         recorder = ClipRecorder(
-            clips_dir, fps, width, height,
+            clips_dir, fps, proc_w, proc_h,
             pre_roll=args.pre_roll, post_roll=args.post_roll, max_duration=args.max_clip,
         )
         tracker = Sort(max_age=5, min_hits=1, iou_threshold=0.3)
 
+        _EMA_ALPHA = 0.1
+        _ema_tile_fps: float | None = None
+        _ema_frame_ms: float | None = None
+
         try:
             with network_group.activate():
                 with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as pipeline:
-                    input_name = input_vstream_infos[0].name
 
                     while not stop_event.is_set():
                         start = time.time()
@@ -489,11 +603,68 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                                 continue
                             break
 
-                        input_data, scale_info = preprocess(frame, input_height, input_width)
-                        input_dict = {input_name: np.expand_dims(input_data, axis=0)}
-                        outputs = pipeline.infer(input_dict)
+                        if proc_w != width or proc_h != height:
+                            frame = cv2.resize(frame, (proc_w, proc_h))
 
-                        detections = postprocess(outputs, scale_info, args.conf)
+                        # Build batch: tiles (if tiling) + full-frame letterbox + zero padding
+                        if args.tile_overlap > 0:
+                            tiles = make_tiles(frame, input_height, args.tile_overlap)
+                            tile_scale = (1.0, 0, 0, input_height, input_width)
+                            batch_imgs = [t[0] for t in tiles]
+                        else:
+                            tiles = []
+                            tile_scale = None
+                            batch_imgs = []
+
+                        full_input, full_scale_info = preprocess(frame, input_height, input_width)
+                        batch_imgs.append(full_input)
+
+                        dummy = np.zeros((input_height, input_width, 3), dtype=np.uint8)
+                        batch_imgs.extend([dummy] * (args.batch_size - len(batch_imgs)))
+
+                        t_tile_start = time.monotonic()
+                        outputs = pipeline.infer({input_name: np.stack(batch_imgs)})
+                        out_list = outputs[output_name]
+                        t_tile_elapsed = time.monotonic() - t_tile_start
+
+                        # Collect tile detections (translate from tile-space to frame-space)
+                        all_dets = []
+                        for i, (_, tx, ty) in enumerate(tiles):
+                            tile_out = {output_name: [out_list[i]]}
+                            for d in postprocess(tile_out, tile_scale, args.conf):
+                                d[0] += tx; d[2] += tx
+                                d[1] += ty; d[3] += ty
+                                all_dets.append(d)
+
+                        # Full-frame output (index = number of tiles)
+                        full_out = {output_name: [out_list[len(tiles)]]}
+                        all_dets.extend(postprocess(full_out, full_scale_info, args.conf))
+
+                        detections = nms(all_dets)
+
+                        if t_tile_elapsed > 0 and stats_monitor is not None:
+                            n_infer = len(tiles) + 1
+                            raw_tile_fps = n_infer / t_tile_elapsed
+                            raw_frame_ms = t_tile_elapsed * 1000
+                            if _ema_tile_fps is None:
+                                _ema_tile_fps = raw_tile_fps
+                                _ema_frame_ms = raw_frame_ms
+                            else:
+                                _ema_tile_fps = _EMA_ALPHA * raw_tile_fps + (1 - _EMA_ALPHA) * _ema_tile_fps
+                                _ema_frame_ms = _EMA_ALPHA * raw_frame_ms + (1 - _EMA_ALPHA) * _ema_frame_ms
+                            stats_monitor.update({
+                                **_hailo_mon.get(),
+                                "tile_fps": round(_ema_tile_fps, 1),
+                                "frame_ms": round(_ema_frame_ms, 1),
+                            })
+
+                        # Log priority-100 detections with frame-space coordinates
+                        for d in detections:
+                            if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100:
+                                _log_detection(COCO_NAMES[int(d[5])], int(d[5]),
+                                               d[4], d[0], d[1], d[2], d[3])
+                        if detections:
+                            csv_file.flush()
 
                         # Run SORT tracker; recover class_id by IoU-matching back to raw detections
                         sort_in = np.array([[*d[:5]] for d in detections], dtype=float) \
@@ -514,9 +685,6 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
 
                         annotated = draw_detections(frame.copy(), detections)
                         frame_buffer.update(annotated)
-
-                        if detections:
-                            csv_file.flush()
 
                         # Feed clip recorder; trigger on priority-100 classes
                         high = [d for d in detections
