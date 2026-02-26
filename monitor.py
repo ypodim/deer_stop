@@ -1,8 +1,10 @@
-"""Hailo + CPU stats sampler.
+"""Hailo + CPU stats sampler, and GPU stats poller.
 
 Runs hailortcli monitor in a background thread to read Hailo device
 utilization and FPS. Requires HAILO_MONITOR=1 in the process environment
 before the Hailo VDevice is opened.
+
+GpuStatsPoller polls pynvml for Nvidia GPU utilization/memory stats.
 """
 
 import re
@@ -109,3 +111,53 @@ class StatsMonitor:
 
         text = _ANSI.sub("", raw.decode("utf-8", errors="replace"))
         return _parse_monitor(text)
+
+
+class GpuStatsPoller:
+    """Polls Nvidia GPU stats via pynvml in a background daemon thread.
+
+    Call get() from any thread to retrieve the latest snapshot.
+    Returns empty dict if pynvml is not installed or no GPU is available.
+    """
+
+    def __init__(self, interval: float = 2.0):
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._stats: dict = {}
+        self._available = False
+
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self._available = True
+        except Exception:
+            return
+
+        self._thread = threading.Thread(target=self._run, daemon=True, name="GpuStatsPoller")
+        self._thread.start()
+
+    def get(self) -> dict:
+        with self._lock:
+            return dict(self._stats)
+
+    def _run(self):
+        try:
+            import pynvml
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        except Exception:
+            return
+
+        while True:
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                stats = {
+                    "gpu_util_percent": util.gpu,
+                    "gpu_mem_used_mb": mem.used // (1024 * 1024),
+                    "gpu_mem_total_mb": mem.total // (1024 * 1024),
+                }
+                with self._lock:
+                    self._stats = stats
+            except Exception:
+                pass
+            time.sleep(self._interval)

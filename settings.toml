@@ -10,10 +10,12 @@ url = "rtsp://admin:tahfug-zatgoz-2kIgvo@192.168.1.241:554/h264Preview_01_sub"
 loop = false  # Loop video file (ignored for webcam/RTSP)
 
 [model]
-model = "/home/pol/ws/deerstop/yolov11l_b8.hef"
+backend = "nvidia"  # "hailo" or "nvidia"
+model = "/media/pol/pond/ws/deerstop_compile/yolo11l.pt"   # .hef for hailo, .engine/.pt for nvidia
 conf = 0.6         # Detection confidence threshold (0.0–1.0)
 tile_overlap = 0.5 # Tile overlap fraction (0.0 = single-pass, 0.5 = 50% overlap tiling)
-batch_size = 8     # Inference batch size (for Hailo: must match the compiled HEF)
+batch_size = 8     # Hailo only: must match compiled HEF batch size
+# imgsz = 640      # Nvidia only: model input size (default 640)
 
 [recording]
 log = "detections.log"

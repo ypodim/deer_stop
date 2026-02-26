@@ -1,4 +1,4 @@
-"""Hailo inference engine, shared frame buffer, and clip recorder."""
+"""Shared frame buffer, clip recorder, pre/postprocessing, and inference loop."""
 
 import csv
 import os
@@ -11,19 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Must be set before hailo_platform is imported so the runtime registers with
-# the hailortcli monitor daemon.
-os.environ.setdefault("HAILO_MONITOR", "1")
-
 import cv2
 import numpy as np
-from hailo_platform import (
-    HEF, VDevice, HailoStreamInterface, ConfigureParams,
-    InputVStreamParams, OutputVStreamParams, FormatType, InferVStreams,
-)
 from sort import Sort
 
-import monitor
 import reviews as reviews_mod
 
 _TZ_PST = ZoneInfo("America/Los_Angeles")
@@ -500,7 +491,7 @@ def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
 # Main inference loop (runs in a daemon thread)
 # ---------------------------------------------------------------------------
 
-def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
+def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None):
     """Blocking inference loop. Intended to run in a daemon thread."""
     global _csv_writer
@@ -518,26 +509,9 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                               "x1", "y1", "x2", "y2"])
         csv_file.flush()
 
-    print(f"Loading HEF: {args.model}")
-    hef = HEF(str(args.model))
-    input_vstream_infos = hef.get_input_vstream_infos()
-    output_vstream_infos = hef.get_output_vstream_infos()
-
-    input_shape = input_vstream_infos[0].shape
-    input_height, input_width = input_shape[0], input_shape[1]
-    input_name = input_vstream_infos[0].name
-    output_name = output_vstream_infos[0].name
-    print(f"Model input: {input_width}x{input_height}")
-
-    with VDevice() as device:
-        configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
-        network_group = device.configure(hef, configure_params)[0]
-        input_vstreams_params = InputVStreamParams.make(network_group, format_type=FormatType.UINT8)
-        output_vstreams_params = OutputVStreamParams.make(network_group, format_type=FormatType.FLOAT32)
-
-        # Internal Hailo hardware monitor — publishes device utilization and FPS
-        # into the shared stats store so the web UI can display them.
-        _hailo_mon = monitor.StatsMonitor()
+    with backend:
+        input_height = backend.input_height
+        input_width = backend.input_width
 
         cap = open_source(source)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -549,14 +523,14 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         print(f"Source: {label} ({width}x{height} @ {fps:.2f} FPS)")
 
         # Scale frame down if needed so tile count stays within the batch budget.
-        max_tiles = args.batch_size - 1  # reserve one slot for the full-frame pass
-        if args.tile_overlap > 0:
+        # Only applicable when the backend has a fixed batch size (max_tiles is not None).
+        if args.tile_overlap > 0 and backend.max_tiles is not None:
             proc_w, proc_h = _compute_downscale(
-                width, height, input_height, args.tile_overlap, max_tiles,
+                width, height, input_height, args.tile_overlap, backend.max_tiles,
             )
             if proc_w != width or proc_h != height:
                 print(f"Downscale: {width}x{height} → {proc_w}x{proc_h} "
-                      f"to keep tiles ≤ {max_tiles}")
+                      f"to keep tiles ≤ {backend.max_tiles}")
         else:
             proc_w, proc_h = width, height
 
@@ -566,10 +540,11 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                 input_height, args.tile_overlap,
             )
             n_total = len(sample_tiles) + 1  # tiles + full-frame
+            max_tiles_str = str(backend.max_tiles) if backend.max_tiles is not None else "unlimited"
             print(f"Tiling: {len(sample_tiles)} tiles + 1 full-frame = {n_total} inferences/frame "
-                  f"({input_height}×{input_width}, {args.tile_overlap:.0%} overlap, batch={args.batch_size})")
+                  f"({input_height}×{input_width}, {args.tile_overlap:.0%} overlap, max_tiles={max_tiles_str})")
         else:
-            print(f"Single-pass: 1 inference/frame (batch={args.batch_size})")
+            print(f"Single-pass: 1 inference/frame")
 
         clips_dir = Path(args.clips_dir)
         recorder = ClipRecorder(
@@ -583,124 +558,106 @@ def run(frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         _ema_frame_ms: float | None = None
 
         try:
-            with network_group.activate():
-                with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as pipeline:
+            while not stop_event.is_set():
+                start = time.time()
 
-                    while not stop_event.is_set():
-                        start = time.time()
+                ret, frame = cap.read()
+                if not ret:
+                    if kind in ("usb", "rtsp"):
+                        if kind == "rtsp":
+                            print("RTSP: lost connection, reconnecting...")
+                            cap.release()
+                            time.sleep(2)
+                            cap = open_source(source)
+                        continue
+                    if args.loop:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    break
 
-                        ret, frame = cap.read()
-                        if not ret:
-                            if kind in ("usb", "rtsp"):
-                                if kind == "rtsp":
-                                    print("RTSP: lost connection, reconnecting...")
-                                    cap.release()
-                                    time.sleep(2)
-                                    cap = open_source(source)
-                                continue
-                            if args.loop:
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                                continue
-                            break
+                if proc_w != width or proc_h != height:
+                    frame = cv2.resize(frame, (proc_w, proc_h))
 
-                        if proc_w != width or proc_h != height:
-                            frame = cv2.resize(frame, (proc_w, proc_h))
+                tiles = make_tiles(frame, input_height, args.tile_overlap) if args.tile_overlap > 0 else []
+                tile_imgs = [t[0] for t in tiles]
 
-                        # Build batch: tiles (if tiling) + full-frame letterbox + zero padding
-                        if args.tile_overlap > 0:
-                            tiles = make_tiles(frame, input_height, args.tile_overlap)
-                            tile_scale = (1.0, 0, 0, input_height, input_width)
-                            batch_imgs = [t[0] for t in tiles]
-                        else:
-                            tiles = []
-                            tile_scale = None
-                            batch_imgs = []
+                t0 = time.monotonic()
+                per_image_dets = backend.infer(tile_imgs + [frame])
+                t_elapsed = time.monotonic() - t0
 
-                        full_input, full_scale_info = preprocess(frame, input_height, input_width)
-                        batch_imgs.append(full_input)
+                # Collect tile detections (translate from tile-space to frame-space)
+                all_dets = []
+                for i, (_, tx, ty) in enumerate(tiles):
+                    for d in per_image_dets[i]:
+                        d = list(d)
+                        d[0] += tx; d[2] += tx
+                        d[1] += ty; d[3] += ty
+                        all_dets.append(d)
 
-                        dummy = np.zeros((input_height, input_width, 3), dtype=np.uint8)
-                        batch_imgs.extend([dummy] * (args.batch_size - len(batch_imgs)))
+                # Full-frame detections (last element)
+                all_dets.extend(per_image_dets[len(tiles)])
 
-                        t_tile_start = time.monotonic()
-                        outputs = pipeline.infer({input_name: np.stack(batch_imgs)})
-                        out_list = outputs[output_name]
-                        t_tile_elapsed = time.monotonic() - t_tile_start
+                detections = nms(all_dets)
 
-                        # Collect tile detections (translate from tile-space to frame-space)
-                        all_dets = []
-                        for i, (_, tx, ty) in enumerate(tiles):
-                            tile_out = {output_name: [out_list[i]]}
-                            for d in postprocess(tile_out, tile_scale, args.conf):
-                                d[0] += tx; d[2] += tx
-                                d[1] += ty; d[3] += ty
-                                all_dets.append(d)
+                if t_elapsed > 0 and stats_monitor is not None:
+                    n_infer = len(tiles) + 1
+                    raw_tile_fps = n_infer / t_elapsed
+                    raw_frame_ms = t_elapsed * 1000
+                    if _ema_tile_fps is None:
+                        _ema_tile_fps = raw_tile_fps
+                        _ema_frame_ms = raw_frame_ms
+                    else:
+                        _ema_tile_fps = _EMA_ALPHA * raw_tile_fps + (1 - _EMA_ALPHA) * _ema_tile_fps
+                        _ema_frame_ms = _EMA_ALPHA * raw_frame_ms + (1 - _EMA_ALPHA) * _ema_frame_ms
+                    stats_monitor.update({
+                        **backend.get_hw_stats(),
+                        "tile_fps": round(_ema_tile_fps, 1),
+                        "frame_ms": round(_ema_frame_ms, 1),
+                    })
 
-                        # Full-frame output (index = number of tiles)
-                        full_out = {output_name: [out_list[len(tiles)]]}
-                        all_dets.extend(postprocess(full_out, full_scale_info, args.conf))
+                # Log priority-100 detections with frame-space coordinates
+                for d in detections:
+                    if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100:
+                        _log_detection(COCO_NAMES[int(d[5])], int(d[5]),
+                                       d[4], d[0], d[1], d[2], d[3])
+                if detections:
+                    csv_file.flush()
 
-                        detections = nms(all_dets)
+                # Run SORT tracker; recover class_id by IoU-matching back to raw detections
+                sort_in = np.array([[*d[:5]] for d in detections], dtype=float) \
+                          if detections else np.empty((0, 5))
+                tracked = tracker.update(sort_in)
+                tracked_dets = []
+                for trk in tracked:
+                    tx1, ty1, tx2, ty2, tid = trk
+                    best_iou, best_det = 0.0, None
+                    for det in detections:
+                        iou = _iou(tx1, ty1, tx2, ty2, *det[:4])
+                        if iou > best_iou:
+                            best_iou, best_det = iou, det
+                    if best_det is not None:
+                        x1, y1, x2, y2, conf, class_id = best_det[:6]
+                        tracked_dets.append([x1, y1, x2, y2, conf, class_id, int(tid)])
+                detections = tracked_dets
 
-                        if t_tile_elapsed > 0 and stats_monitor is not None:
-                            n_infer = len(tiles) + 1
-                            raw_tile_fps = n_infer / t_tile_elapsed
-                            raw_frame_ms = t_tile_elapsed * 1000
-                            if _ema_tile_fps is None:
-                                _ema_tile_fps = raw_tile_fps
-                                _ema_frame_ms = raw_frame_ms
-                            else:
-                                _ema_tile_fps = _EMA_ALPHA * raw_tile_fps + (1 - _EMA_ALPHA) * _ema_tile_fps
-                                _ema_frame_ms = _EMA_ALPHA * raw_frame_ms + (1 - _EMA_ALPHA) * _ema_frame_ms
-                            stats_monitor.update({
-                                **_hailo_mon.get(),
-                                "tile_fps": round(_ema_tile_fps, 1),
-                                "frame_ms": round(_ema_frame_ms, 1),
-                            })
+                annotated = draw_detections(frame.copy(), detections)
+                frame_buffer.update(annotated)
 
-                        # Log priority-100 detections with frame-space coordinates
-                        for d in detections:
-                            if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100:
-                                _log_detection(COCO_NAMES[int(d[5])], int(d[5]),
-                                               d[4], d[0], d[1], d[2], d[3])
-                        if detections:
-                            csv_file.flush()
+                # Feed clip recorder; trigger on priority-100 classes
+                high = [d for d in detections
+                        if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100]
+                if high:
+                    best = max(high, key=lambda d: d[4])
+                    clip_info = recorder.push(annotated, COCO_NAMES[int(best[5])], best[4])
+                else:
+                    clip_info = recorder.push(annotated)
 
-                        # Run SORT tracker; recover class_id by IoU-matching back to raw detections
-                        sort_in = np.array([[*d[:5]] for d in detections], dtype=float) \
-                                  if detections else np.empty((0, 5))
-                        tracked = tracker.update(sort_in)
-                        tracked_dets = []
-                        for trk in tracked:
-                            tx1, ty1, tx2, ty2, tid = trk
-                            best_iou, best_det = 0.0, None
-                            for det in detections:
-                                iou = _iou(tx1, ty1, tx2, ty2, *det[:4])
-                                if iou > best_iou:
-                                    best_iou, best_det = iou, det
-                            if best_det is not None:
-                                x1, y1, x2, y2, conf, class_id = best_det[:6]
-                                tracked_dets.append([x1, y1, x2, y2, conf, class_id, int(tid)])
-                        detections = tracked_dets
+                if clip_info is not None:
+                    reviews_mod.add(reviews_path, reviews_lock, clip_info)
 
-                        annotated = draw_detections(frame.copy(), detections)
-                        frame_buffer.update(annotated)
-
-                        # Feed clip recorder; trigger on priority-100 classes
-                        high = [d for d in detections
-                                if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100]
-                        if high:
-                            best = max(high, key=lambda d: d[4])
-                            clip_info = recorder.push(annotated, COCO_NAMES[int(best[5])], best[4])
-                        else:
-                            clip_info = recorder.push(annotated)
-
-                        if clip_info is not None:
-                            reviews_mod.add(reviews_path, reviews_lock, clip_info)
-
-                        elapsed = time.time() - start
-                        if kind != "rtsp" and elapsed < frame_time:
-                            time.sleep(frame_time - elapsed)
+                elapsed = time.time() - start
+                if kind != "rtsp" and elapsed < frame_time:
+                    time.sleep(frame_time - elapsed)
 
         finally:
             clip_info = recorder.force_close()

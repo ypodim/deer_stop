@@ -33,7 +33,7 @@ SETTINGS_PATH = Path(__file__).parent / "settings.toml"
 DEFAULTS = {
     "server":    {"port": 8080},
     "source":    {"loop": False},
-    "model":     {"model": str(Path(__file__).parent / "yolov11m.hef"), "conf": 0.5, "tile_overlap": 0.0, "batch_size": 1},
+    "model":     {"backend": "hailo", "model": str(Path(__file__).parent / "yolov11m.hef"), "conf": 0.5, "tile_overlap": 0.0, "batch_size": 1, "imgsz": 640},
     "recording": {
         "log":          "detections.log",
         "clips_dir":    str(Path(__file__).parent / "clips"),
@@ -63,10 +63,12 @@ def load_settings() -> SimpleNamespace:
     return SimpleNamespace(
         source    = cfg.get("source", {}).get("url", None),
         loop      = get("source", "loop"),
+        backend      = get("model", "backend"),
         model        = model,
         conf         = get("model", "conf"),
         tile_overlap = get("model", "tile_overlap"),
         batch_size   = get("model", "batch_size"),
+        imgsz        = get("model", "imgsz"),
         port      = get("server", "port"),
         log       = get("recording", "log"),
         clips_dir = get("recording", "clips_dir"),
@@ -79,6 +81,13 @@ def load_settings() -> SimpleNamespace:
 
 def main():
     args = load_settings()
+
+    if args.backend == "nvidia":
+        from backend_nvidia import NvidiaBackend
+        backend = NvidiaBackend(args.model, args.conf)
+    else:
+        from backend_hailo import HailoBackend
+        backend = HailoBackend(args.model, args.batch_size, args.conf)
 
     reviews_path = Path(args.reviews)
     reviews_lock = threading.Lock()
@@ -95,7 +104,7 @@ def main():
     stop_event = threading.Event()
     det_thread = threading.Thread(
         target=detector.run,
-        args=(frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store),
+        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store),
         daemon=True,
     )
     det_thread.start()
