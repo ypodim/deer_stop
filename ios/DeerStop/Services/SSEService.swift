@@ -24,7 +24,7 @@ final class SSEService: NSObject, URLSessionDataDelegate {
         var req = URLRequest(url: url, timeoutInterval: .infinity)
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         if let token = KeychainService.load(forKey: "authToken") {
-            req.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         task = session.dataTask(with: req)
         task?.resume()

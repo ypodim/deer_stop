@@ -20,11 +20,12 @@ struct ClipPlayerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             guard let url = APIService.shared.clipVideoURL(filename: clip.filename) else { return }
-            var req = URLRequest(url: url)
+            // Pass the Bearer auth header directly to AVURLAsset so nginx lets the request through
+            var options: [String: Any] = [:]
             if let token = KeychainService.load(forKey: "authToken") {
-                req.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+                options[AVURLAssetHTTPHeaderFieldsKey] = ["Authorization": "Bearer \(token)"]
             }
-            let asset = AVURLAsset(url: url)  // AVPlayer handles auth via URLSession config
+            let asset = AVURLAsset(url: url, options: options)
             player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
             player?.play()
         }

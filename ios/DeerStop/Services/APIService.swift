@@ -23,7 +23,7 @@ final class APIService: ObservableObject {
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let token = authToken {
-            req.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         return req
     }

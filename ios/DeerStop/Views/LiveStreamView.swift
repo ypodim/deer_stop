@@ -30,8 +30,11 @@ struct RTCVideoView: UIViewRepresentable {
 /// WebRTC, and renders the incoming video from the detection server.
 @MainActor
 struct LiveStreamView: View {
-    @StateObject private var signalingService = SignalingService()
+    @StateObject private var signalingService: SignalingService
     @StateObject private var webRTCService: WebRTCService
+    // Strong reference to the delegate so it isn't deallocated while the
+    // signaling connection is alive (signalingService.delegate is weak).
+    @State private var streamDelegate: StreamDelegate?
     @State private var stats: [String: Double] = [:]
     @State private var statsTimer: Timer?
     @State private var connectionStatus = "Connecting…"
@@ -72,6 +75,7 @@ struct LiveStreamView: View {
             signalingService.disconnect()
             webRTCService.close()
             statsTimer?.invalidate()
+            streamDelegate = nil
         }
         .onChange(of: webRTCService.isConnected) { _, connected in
             connectionStatus = connected ? "Connected" : "Connecting…"
@@ -88,13 +92,12 @@ struct LiveStreamView: View {
             connectionStatus = "⚠ Configure server in Settings"
             return
         }
-        signalingService.delegate = makeDelegate()
+        // Keep a strong reference so the delegate isn't released immediately.
+        let delegate = StreamDelegate(webRTCService: webRTCService, signalingService: signalingService)
+        streamDelegate = delegate
+        signalingService.delegate = delegate
         signalingService.connect(to: sigURL, authToken: token)
         startStatsPolling()
-    }
-
-    private func makeDelegate() -> some SignalingDelegate {
-        StreamDelegate(webRTCService: webRTCService, signalingService: signalingService)
     }
 
     private func startStatsPolling() {
@@ -111,7 +114,7 @@ struct LiveStreamView: View {
 // MARK: - Signaling delegate shim (avoids circular reference)
 
 @MainActor
-private class StreamDelegate: SignalingDelegate {
+class StreamDelegate: SignalingDelegate {
     private let webRTCService:    WebRTCService
     private let signalingService: SignalingService
 
