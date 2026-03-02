@@ -18,9 +18,11 @@ from fractions import Fraction
 from types import SimpleNamespace
 
 import av
-from aiortc import RTCIceCandidate, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.rtcicetransport import candidate_from_aioice
 from aiortc.contrib.media import MediaStreamTrack
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType
+from aioice.candidate import Candidate as AioIceCandidate
 
 from detector import FrameBuffer
 
@@ -174,11 +176,13 @@ async def run_signaling_client(frame_buffer: FrameBuffer, args: SimpleNamespace)
                                 pc = peer_connections.get(viewer_id)
                                 if pc and data.get("candidate"):
                                     c = data["candidate"]
-                                    await pc.addIceCandidate(RTCIceCandidate(
-                                        candidate=c["candidate"],
-                                        sdpMid=c.get("sdpMid"),
-                                        sdpMLineIndex=c.get("sdpMLineIndex"),
-                                    ))
+                                    sdp_line = c.get("candidate", "")
+                                    if sdp_line:
+                                        aioice_c = AioIceCandidate.from_sdp(sdp_line)
+                                        rtc_c = candidate_from_aioice(aioice_c)
+                                        rtc_c.sdpMid = c.get("sdpMid")
+                                        rtc_c.sdpMLineIndex = c.get("sdpMLineIndex")
+                                        await pc.addIceCandidate(rtc_c)
 
                             elif msg_type == "viewer_disconnected":
                                 viewer_id = data["viewer_id"]
