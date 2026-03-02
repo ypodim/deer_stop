@@ -1,5 +1,8 @@
 [server]
 port = 8080
+# Bind address. Use 127.0.0.1 when behind an autossh tunnel (default).
+# Change to 0.0.0.0 for direct LAN access without a tunnel.
+host = "127.0.0.1"
 
 [source]
 # Set url in settings.local.toml (gitignored).
@@ -16,6 +19,13 @@ conf = 0.6         # Detection confidence threshold (0.0–1.0)
 tile_overlap = 0.5 # Tile overlap fraction (0.0 = single-pass, 0.5 = 50% overlap tiling)
 batch_size = 8     # Hailo only: must match compiled HEF batch size
 # imgsz = 640      # Nvidia only: model input size (default 640)
+
+[node]
+# Remote Node server for out-of-network access via WebRTC + SSE relay.
+# Put auth_token in settings.local.toml (gitignored).
+signaling_url = "wss://node.polychronis.gr/signaling"
+turn_url = "turn:node.polychronis.gr:3478"
+auth_token = ""
 
 [recording]
 log = "detections.log"

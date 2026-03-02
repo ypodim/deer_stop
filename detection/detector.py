@@ -2,6 +2,7 @@
 
 import csv
 import os
+import queue as _queue
 import subprocess
 import sys
 import threading
@@ -211,6 +212,39 @@ class FrameBuffer:
         """Non-blocking; returns None if no frame has arrived yet."""
         with self.lock:
             return self.frame
+
+
+# ---------------------------------------------------------------------------
+# EventQueue — fan-out detection events to SSE handlers
+# ---------------------------------------------------------------------------
+
+class EventQueue:
+    """Thread-safe fan-out queue: detector thread puts events, SSE handlers subscribe."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._subscribers: list[_queue.SimpleQueue] = []
+
+    def subscribe(self) -> _queue.SimpleQueue:
+        """Register a new SSE consumer; returns its private queue."""
+        q: _queue.SimpleQueue = _queue.SimpleQueue()
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: _queue.SimpleQueue) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    def put(self, event: dict) -> None:
+        """Broadcast an event to all current subscribers (called from detector thread)."""
+        with self._lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            q.put(event)
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +526,8 @@ def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
-        reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None):
+        reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None,
+        event_queue: EventQueue | None = None):
     """Blocking inference loop. Intended to run in a daemon thread."""
     global _csv_writer
 
@@ -673,6 +708,8 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
 
                 if clip_info is not None:
                     reviews_mod.add(reviews_path, reviews_lock, clip_info)
+                    if event_queue is not None:
+                        event_queue.put(clip_info)
 
                 elapsed = time.time() - start
                 if kind != "rtsp" and elapsed < frame_time:
@@ -682,5 +719,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
             clip_info = recorder.force_close()
             if clip_info is not None:
                 reviews_mod.add(reviews_path, reviews_lock, clip_info)
+                if event_queue is not None:
+                    event_queue.put(clip_info)
             cap.release()
             csv_file.close()

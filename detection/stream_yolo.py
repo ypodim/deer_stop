@@ -32,7 +32,7 @@ SETTINGS_PATH = Path(__file__).parent / "settings.toml"
 LOCAL_SETTINGS_PATH = Path(__file__).parent / "settings.local.toml"
 
 DEFAULTS = {
-    "server":    {"port": 8080},
+    "server":    {"port": 8080, "host": "127.0.0.1"},
     "source":    {"loop": False},
     "model":     {"backend": "hailo", "model": str(Path(__file__).parent / "yolov11m.hef"), "conf": 0.5, "tile_overlap": 0.0, "batch_size": 1, "imgsz": 640},
     "recording": {
@@ -42,6 +42,11 @@ DEFAULTS = {
         "pre_roll":     3.0,
         "post_roll":    5.0,
         "max_clip":     30.0,
+    },
+    "node": {
+        "signaling_url": "",
+        "turn_url":      "",
+        "auth_token":    "",
     },
 }
 
@@ -86,12 +91,16 @@ def load_settings() -> SimpleNamespace:
         batch_size   = get("model", "batch_size"),
         imgsz        = get("model", "imgsz"),
         port      = get("server", "port"),
+        host      = get("server", "host"),
         log       = get("recording", "log"),
         clips_dir = get("recording", "clips_dir"),
         reviews   = get("recording", "reviews"),
         pre_roll  = get("recording", "pre_roll"),
         post_roll = get("recording", "post_roll"),
         max_clip  = get("recording", "max_clip"),
+        node_signaling_url = get("node", "signaling_url"),
+        node_turn_url      = get("node", "turn_url"),
+        node_auth_token    = get("node", "auth_token"),
     )
 
 
@@ -115,21 +124,34 @@ def main():
     reviews.prune(reviews_path, reviews_lock)
 
     frame_buffer = detector.FrameBuffer()
+    event_queue = detector.EventQueue()
     stats_store = stats.StatsStore()
 
     stop_event = threading.Event()
     det_thread = threading.Thread(
         target=detector.run,
-        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store),
+        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store, event_queue),
         daemon=True,
     )
     det_thread.start()
 
-    app = web.make_app(frame_buffer, reviews_path, reviews_lock, clips_dir, templates_dir, stats_store)
-    app.listen(args.port)
+    app = web.make_app(frame_buffer, reviews_path, reviews_lock, clips_dir, templates_dir, stats_store, event_queue)
+    app.listen(args.port, address=args.host)
 
-    print(f"Stream:  http://localhost:{args.port}")
-    print(f"Review:  http://localhost:{args.port}/review")
+    print(f"Stream:  http://{args.host}:{args.port}")
+    print(f"Review:  http://{args.host}:{args.port}/review")
+
+    # Start WebRTC signaling client if configured
+    if args.node_signaling_url and args.node_auth_token:
+        import webrtc as webrtc_mod
+        ioloop = tornado.ioloop.IOLoop.current()
+        ioloop.asyncio_loop.create_task(
+            webrtc_mod.run_signaling_client(frame_buffer, args)
+        )
+        print(f"Signaling: {args.node_signaling_url}")
+    else:
+        print("Node signaling not configured (set [node] signaling_url + auth_token)")
+
     print("Press Ctrl+C to stop")
 
     try:

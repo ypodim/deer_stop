@@ -1,4 +1,4 @@
-"""Tornado web application: MJPEG streaming and detection review UI."""
+"""Tornado web application: MJPEG streaming, detection review UI, and SSE events."""
 
 import asyncio
 import json
@@ -78,8 +78,35 @@ class ClipReviewHandler(tornado.web.RequestHandler):
         self.set_status(204)
 
 
+class EventsHandler(tornado.web.RequestHandler):
+    """Server-Sent Events endpoint. Streams clip-saved events to connected clients."""
+
+    def initialize(self, event_queue):
+        self._event_queue = event_queue
+
+    async def get(self):
+        self.set_header("Content-Type", "text/event-stream")
+        self.set_header("Cache-Control", "no-cache")
+        self.set_header("X-Accel-Buffering", "no")  # disable nginx buffering
+        q = self._event_queue.subscribe()
+        try:
+            while True:
+                try:
+                    event = q.get_nowait()
+                    self.write(f"data: {json.dumps(event)}\n\n")
+                    await self.flush()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.3)
+        except tornado.iostream.StreamClosedError:
+            pass
+        finally:
+            self._event_queue.unsubscribe(q)
+
+
 def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
-             clips_dir: Path, templates_dir: Path, stats_monitor) -> tornado.web.Application:
+             clips_dir: Path, templates_dir: Path, stats_monitor,
+             event_queue) -> tornado.web.Application:
     shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock)
     return tornado.web.Application(
         [
@@ -90,6 +117,7 @@ def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
             (r"/clips/(.+)/review", ClipReviewHandler, shared),
             (r"/clips/files/(.*)", tornado.web.StaticFileHandler, {"path": str(clips_dir)}),
             (r"/stats", StatsHandler, {"stats_monitor": stats_monitor}),
+            (r"/events", EventsHandler, {"event_queue": event_queue}),
         ],
         template_path=str(templates_dir),
     )

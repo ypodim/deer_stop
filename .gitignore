@@ -1,9 +1,18 @@
-settings.local.toml
+# Detection server
+detection/settings.local.toml
+detection/reviews.json
+detection/clips/
+detection/detections.log
+
+# Node server
+node/.env
+node/nginx/.htpasswd
+node/coturn/turnserver.conf
+
+# Python
 one.py
 ._*
 *.log
-deer.mp4
 __pycache__/
 *.pyc
-reviews.json
-clips/
+deer.mp4
