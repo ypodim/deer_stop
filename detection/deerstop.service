@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pol
-WorkingDirectory=/home/pol/ws/deerstop
+WorkingDirectory=/home/pol/ws/deerstop/detection
 ExecStart=/media/pol/pond/ws/deerstop_compile/venv/bin/python stream_yolo.py
 Restart=on-failure
 RestartSec=5
