@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=pol
 WorkingDirectory=/home/pol/ws/deerstop/detection
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/media/pol/pond/ws/deerstop_compile/venv/bin/python stream_yolo.py
 Restart=on-failure
 RestartSec=5
