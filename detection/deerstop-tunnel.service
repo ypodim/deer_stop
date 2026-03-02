@@ -1,0 +1,23 @@
+[Unit]
+Description=Deerstop autossh reverse tunnel to Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pol
+# Forwards Node:18080 → localhost:8080 so nginx on Node can proxy the REST/SSE API.
+# Requires passwordless SSH access to node.polychronis.gr (key already configured).
+ExecStart=/usr/bin/autossh \
+    -M 0 \
+    -N \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -R 18080:localhost:8080 \
+    pol@node.polychronis.gr
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+# coturn configuration for DeerStop
+# Copy to turnserver.conf and fill in the values, then start with docker-compose.
+#
+# cp turnserver.conf.example turnserver.conf
+# (edit TURN_SECRET below, then docker-compose up -d)
+
+# Use HMAC-based time-limited credentials (matches server.js makeTurnCredentials)
+use-auth-secret
+static-auth-secret=REPLACE_WITH_TURN_SECRET
+
+realm=node.polychronis.gr
+
+# Listening ports
+listening-port=3478
+tls-listening-port=5349
+
+# UDP relay port range — open these in your firewall
+min-port=49152
+max-port=65535
+
+# Log to stdout (captured by Docker)
+log-file=stdout
+simple-log
+
+# Optional: restrict relay to your expected client subnets
+# denied-peer-ip=10.0.0.0-10.255.255.255
+# denied-peer-ip=192.168.0.0-192.168.255.255

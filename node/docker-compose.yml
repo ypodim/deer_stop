@@ -1,0 +1,19 @@
+services:
+  signaling:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./signaling:/app
+    command: sh -c "npm ci --omit=dev && node server.js"
+    env_file: .env
+    environment:
+      - PORT=3001
+    network_mode: host   # bind to 127.0.0.1:3001 on the host
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:latest
+    network_mode: host   # needs direct UDP access for TURN relay
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    restart: unless-stopped
