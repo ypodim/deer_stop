@@ -1,3 +1,5 @@
+import AVFoundation
+import AVKit
 import SwiftUI
 
 struct ClipBrowserView: View {
@@ -78,25 +80,102 @@ struct ClipBrowserView: View {
     }
 }
 
+// MARK: - Looping preview player (UIKit-backed, muted, no controls)
+
+private struct LoopingPreviewPlayer: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> UIView {
+        let view = PlayerUIView(player: player)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    private class PlayerUIView: UIView {
+        private let playerLayer = AVPlayerLayer()
+
+        init(player: AVPlayer) {
+            super.init(frame: .zero)
+            player.isMuted = true
+            playerLayer.player = player
+            playerLayer.videoGravity = .resizeAspectFill
+            layer.addSublayer(playerLayer)
+
+            // Loop playback
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(playerDidFinish),
+                name: .AVPlayerItemDidPlayToEndTime,
+                object: player.currentItem
+            )
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            playerLayer.frame = bounds
+        }
+
+        @objc private func playerDidFinish() {
+            playerLayer.player?.seek(to: .zero)
+            playerLayer.player?.play()
+        }
+    }
+}
+
 // MARK: - Thumbnail cell
 
 private struct ClipThumbnailCell: View {
     let clip: Clip
     let onMarkReviewed: () -> Void
 
+    @State private var thumbnailImage: UIImage?
+    @State private var previewPlayer: AVPlayer?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                Rectangle()
-                    .fill(Color(.secondarySystemBackground))
-                    .aspectRatio(16 / 9, contentMode: .fit)
-                    .overlay(Image(systemName: "film").foregroundStyle(.secondary))
+                // Preview video or static thumbnail
+                Group {
+                    if let player = previewPlayer {
+                        LoopingPreviewPlayer(player: player)
+                            .aspectRatio(16 / 9, contentMode: .fit)
+                    } else if let image = thumbnailImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(16 / 9, contentMode: .fit)
+                    } else {
+                        Rectangle()
+                            .fill(Color(.secondarySystemBackground))
+                            .aspectRatio(16 / 9, contentMode: .fit)
+                            .overlay(ProgressView())
+                    }
+                }
 
+                // Unreviewed indicator
                 if !clip.reviewed {
                     Circle()
                         .fill(.orange)
                         .frame(width: 10, height: 10)
                         .padding(6)
+                }
+
+                // Class label overlay
+                VStack {
+                    Spacer()
+                    HStack {
+                        Text(clip.label)
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.black.opacity(0.6))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Spacer()
+                    }
+                    .padding(4)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -111,5 +190,41 @@ private struct ClipThumbnailCell: View {
                 .foregroundStyle(.secondary)
                 .disabled(clip.reviewed)
         }
+        .task { await loadThumbnail() }
+        .task { await loadPreview() }
+        .onDisappear {
+            previewPlayer?.pause()
+            previewPlayer = nil
+        }
+    }
+
+    private func loadThumbnail() async {
+        guard let thumbName = clip.thumbFilename,
+              let url = APIService.shared.clipThumbnailURL(filename: thumbName) else { return }
+        let req = APIService.shared.authorizedRequest(for: url)
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let image = UIImage(data: data) else { return }
+        thumbnailImage = image
+    }
+
+    private func loadPreview() async {
+        guard let url = APIService.shared.clipPreviewURL(filename: clip.previewFilename) else { return }
+
+        // Check if preview exists (HEAD request)
+        var headReq = APIService.shared.authorizedRequest(for: url)
+        headReq.httpMethod = "HEAD"
+        guard let (_, resp) = try? await URLSession.shared.data(for: headReq),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+
+        // Load preview video with auth
+        let token = KeychainService.load(forKey: "authToken") ?? ""
+        let asset = AVURLAsset(url: url, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Bearer \(token)"]
+        ])
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = true
+        previewPlayer = player
+        player.play()
     }
 }

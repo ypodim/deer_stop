@@ -34,9 +34,34 @@ def _transcode(src: Path):
     if result.returncode == 0:
         tmp.replace(src)
         print(f"Transcode done in {elapsed:.1f}s: {src.name}")
+        _generate_preview(src)
     else:
         tmp.unlink(missing_ok=True)
         print(f"ffmpeg transcode failed for {src} ({elapsed:.1f}s): {result.stderr.decode()}")
+
+
+def _generate_preview(src: Path):
+    """Generate a short looping preview MP4 (first 3 seconds, 320px wide, no audio)."""
+    preview = src.with_name(src.stem + "_preview.mp4")
+    if preview.exists():
+        return
+    t0 = time.monotonic()
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(src),
+         "-t", "3",
+         "-vf", "scale=320:-2",
+         "-an",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+         "-movflags", "+faststart",
+         str(preview)],
+        capture_output=True,
+    )
+    elapsed = time.monotonic() - t0
+    if result.returncode == 0:
+        print(f"Preview done in {elapsed:.1f}s: {preview.name}")
+    else:
+        preview.unlink(missing_ok=True)
+        print(f"Preview failed for {src.name}: {result.stderr.decode()[:200]}")
 
 
 # ---------------------------------------------------------------------------
