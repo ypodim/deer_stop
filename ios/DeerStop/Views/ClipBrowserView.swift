@@ -97,7 +97,6 @@ private struct LoopingPreviewPlayer: UIViewRepresentable {
 
         init(player: AVPlayer) {
             super.init(frame: .zero)
-            player.isMuted = true
             playerLayer.player = player
             playerLayer.videoGravity = .resizeAspectFill
             layer.addSublayer(playerLayer)
@@ -208,7 +207,6 @@ private struct ClipThumbnailCell: View {
         ])
         let item = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: item)
-        player.isMuted = true
         previewPlayer = player
         player.play()
     }
