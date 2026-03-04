@@ -206,7 +206,7 @@ def _transcode(src: Path, audio_path: Path | None = None):
 
 
 def _generate_preview(src: Path):
-    """Generate a short looping preview MP4 (first 3 seconds, 320px wide, no audio)."""
+    """Generate a short looping preview MP4 (first 3 seconds, 320px wide)."""
     preview = src.with_name(src.stem + "_preview.mp4")
     if preview.exists():
         return
@@ -215,8 +215,8 @@ def _generate_preview(src: Path):
         ["ffmpeg", "-y", "-i", str(src),
          "-t", "3",
          "-vf", "scale=320:-2",
-         "-an",
          "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+         "-c:a", "aac", "-b:a", "64k",
          "-movflags", "+faststart",
          str(preview)],
         capture_output=True,
