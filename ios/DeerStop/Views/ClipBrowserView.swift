@@ -64,7 +64,7 @@ struct ClipBrowserView: View {
         defer { isLoading = false }
         do {
             clips = try await APIService.shared.fetchClips()
-                .sorted { !$0.reviewed && $1.reviewed }
+                .sorted { $0.id > $1.id }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -131,20 +131,15 @@ private struct ClipThumbnailCell: View {
     let clip: Clip
     let onMarkReviewed: () -> Void
 
-    @State private var thumbnailImage: UIImage?
     @State private var previewPlayer: AVPlayer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                // Preview video or static thumbnail
+                // Preview video or placeholder
                 Group {
                     if let player = previewPlayer {
                         LoopingPreviewPlayer(player: player)
-                            .aspectRatio(16 / 9, contentMode: .fit)
-                    } else if let image = thumbnailImage {
-                        Image(uiImage: image)
-                            .resizable()
                             .aspectRatio(16 / 9, contentMode: .fit)
                     } else {
                         Rectangle()
@@ -190,21 +185,11 @@ private struct ClipThumbnailCell: View {
                 .foregroundStyle(.secondary)
                 .disabled(clip.reviewed)
         }
-        .task { await loadThumbnail() }
         .task { await loadPreview() }
         .onDisappear {
             previewPlayer?.pause()
             previewPlayer = nil
         }
-    }
-
-    private func loadThumbnail() async {
-        guard let thumbName = clip.thumbFilename,
-              let url = APIService.shared.clipThumbnailURL(filename: thumbName) else { return }
-        let req = APIService.shared.authorizedRequest(for: url)
-        guard let (data, _) = try? await URLSession.shared.data(for: req),
-              let image = UIImage(data: data) else { return }
-        thumbnailImage = image
     }
 
     private func loadPreview() async {

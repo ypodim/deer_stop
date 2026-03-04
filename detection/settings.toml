@@ -15,7 +15,7 @@ loop = false  # Loop video file (ignored for webcam/RTSP)
 [model]
 backend = "nvidia"  # "hailo" or "nvidia"
 model = "/media/pol/pond/ws/deerstop_compile/yolo11l.pt"   # .hef for hailo, .engine/.pt for nvidia
-conf = 0.6         # Detection confidence threshold (0.0–1.0)
+conf = 0.8         # Detection confidence threshold (0.0–1.0)
 tile_overlap = 0.5 # Tile overlap fraction (0.0 = single-pass, 0.5 = 50% overlap tiling)
 batch_size = 8     # Hailo only: must match compiled HEF batch size
 # imgsz = 640      # Nvidia only: model input size (default 640)
