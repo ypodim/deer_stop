@@ -62,11 +62,6 @@ final class APIService: ObservableObject {
         return URL(string: "/api/clips/files/\(filename)", relativeTo: base)
     }
 
-    func clipThumbnailURL(filename: String) -> URL? {
-        guard let base = baseURL else { return nil }
-        return URL(string: "/api/clips/files/\(filename)", relativeTo: base)
-    }
-
     func clipPreviewURL(filename: String) -> URL? {
         guard let base = baseURL else { return nil }
         return URL(string: "/api/clips/files/\(filename)", relativeTo: base)

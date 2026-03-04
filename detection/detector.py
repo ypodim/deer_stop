@@ -21,15 +21,177 @@ import reviews as reviews_mod
 _TZ_PST = ZoneInfo("America/Los_Angeles")
 
 
-def _transcode(src: Path):
-    """Re-encode a clip to H.264 in a background thread so the detector isn't stalled."""
+# ---------------------------------------------------------------------------
+# Audio capture — continuous ring buffer from RTSP audio stream
+# ---------------------------------------------------------------------------
+
+class AudioCapture:
+    """Continuously captures audio from an RTSP stream into a ring buffer."""
+
+    def __init__(self, rtsp_url: str, buffer_seconds: float = 120.0,
+                 sample_rate: int = 48000, channels: int = 1):
+        self.rtsp_url = rtsp_url
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.bytes_per_sample = 2  # s16le
+        self.bytes_per_second = sample_rate * channels * self.bytes_per_sample
+
+        self._chunk_duration = 0.5  # seconds per chunk
+        self._chunk_bytes = int(self.bytes_per_second * self._chunk_duration)
+        max_chunks = int(buffer_seconds / self._chunk_duration)
+        self._buffer: deque[tuple[float, bytes]] = deque(maxlen=max_chunks)
+        self._lock = threading.Lock()
+
+        self._process: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    # -- public API --
+
+    def start(self) -> bool:
+        """Probe for audio and start capture. Returns True if audio is available."""
+        if not self._has_audio():
+            print("AudioCapture: no audio track found, continuing without audio")
+            return False
+
+        self._running = True
+        self._process = subprocess.Popen(
+            ["ffmpeg", "-rtsp_transport", "tcp",
+             "-i", self.rtsp_url,
+             "-vn",
+             "-acodec", "pcm_s16le",
+             "-ar", str(self.sample_rate),
+             "-ac", str(self.channels),
+             "-f", "s16le",
+             "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name="AudioCapture",
+        )
+        self._thread.start()
+        print(f"AudioCapture: started ({self.sample_rate}Hz, {self.channels}ch, "
+              f"buffer={self._buffer.maxlen * self._chunk_duration:.0f}s)")
+        return True
+
+    def extract(self, start_time: float, end_time: float,
+                out_dir: Path) -> Path | None:
+        """Extract audio for [start_time, end_time] and save as a WAV file."""
+        with self._lock:
+            chunks = [(t, d) for t, d in self._buffer
+                      if t >= start_time - self._chunk_duration and t <= end_time]
+        if not chunks:
+            return None
+
+        raw = b"".join(d for _, d in chunks)
+        wav_path = out_dir / f"_audio_{int(start_time)}.wav"
+        self._write_wav(wav_path, raw)
+        return wav_path
+
+    def restart(self):
+        """Restart audio capture (e.g. after RTSP reconnection)."""
+        self.stop()
+        time.sleep(1)
+        self.start()
+
+    def stop(self):
+        self._running = False
+        self._cleanup_process()
+
+    # -- internals --
+
+    def _has_audio(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet",
+                 "-rtsp_transport", "tcp",
+                 "-select_streams", "a",
+                 "-show_entries", "stream=codec_type",
+                 "-of", "csv=p=0",
+                 self.rtsp_url],
+                capture_output=True, timeout=10,
+            )
+            return b"audio" in result.stdout
+        except Exception as e:
+            print(f"AudioCapture: probe failed: {e}")
+            return False
+
+    def _reader_loop(self):
+        try:
+            while self._running and self._process and self._process.poll() is None:
+                data = self._process.stdout.read(self._chunk_bytes)
+                if not data:
+                    break
+                t = time.time()
+                with self._lock:
+                    self._buffer.append((t, data))
+        except Exception as e:
+            print(f"AudioCapture: reader error: {e}")
+        finally:
+            self._cleanup_process()
+
+    def _cleanup_process(self):
+        if self._process:
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=3)
+            except Exception:
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
+            self._process = None
+
+    def _write_wav(self, path: Path, pcm_data: bytes):
+        import struct
+        n = len(pcm_data)
+        with open(path, "wb") as f:
+            f.write(b"RIFF")
+            f.write(struct.pack("<I", 36 + n))
+            f.write(b"WAVE")
+            f.write(b"fmt ")
+            f.write(struct.pack("<I", 16))
+            f.write(struct.pack("<H", 1))                          # PCM
+            f.write(struct.pack("<H", self.channels))
+            f.write(struct.pack("<I", self.sample_rate))
+            f.write(struct.pack("<I", self.bytes_per_second))
+            f.write(struct.pack("<H", self.channels * self.bytes_per_sample))
+            f.write(struct.pack("<H", self.bytes_per_sample * 8))  # bits per sample
+            f.write(b"data")
+            f.write(struct.pack("<I", n))
+            f.write(pcm_data)
+
+
+# ---------------------------------------------------------------------------
+# Clip transcoding / preview generation
+# ---------------------------------------------------------------------------
+
+def _transcode(src: Path, audio_path: Path | None = None):
+    """Re-encode a clip to H.264, optionally muxing in audio."""
     tmp = src.with_suffix(".tmp.mp4")
     t0 = time.monotonic()
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-c:v", "libx264",
-         "-preset", "fast", "-crf", "23", str(tmp)],
-        capture_output=True,
-    )
+
+    if audio_path and audio_path.exists():
+        result = subprocess.run(
+            ["ffmpeg", "-y",
+             "-i", str(src),
+             "-i", str(audio_path),
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+             "-c:a", "aac", "-b:a", "128k",
+             "-shortest",
+             "-movflags", "+faststart",
+             str(tmp)],
+            capture_output=True,
+        )
+        audio_path.unlink(missing_ok=True)
+    else:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(src), "-c:v", "libx264",
+             "-preset", "fast", "-crf", "23", str(tmp)],
+            capture_output=True,
+        )
+
     elapsed = time.monotonic() - t0
     if result.returncode == 0:
         tmp.replace(src)
@@ -37,7 +199,10 @@ def _transcode(src: Path):
         _generate_preview(src)
     else:
         tmp.unlink(missing_ok=True)
-        print(f"ffmpeg transcode failed for {src} ({elapsed:.1f}s): {result.stderr.decode()}")
+        if audio_path:
+            audio_path.unlink(missing_ok=True)
+        print(f"ffmpeg transcode failed for {src} ({elapsed:.1f}s): "
+              f"{result.stderr.decode()[:300]}")
 
 
 def _generate_preview(src: Path):
@@ -283,25 +448,27 @@ class ClipRecorder:
     RECORDING = "recording"
 
     def __init__(self, clips_dir: Path, fps: float, width: int, height: int,
-                 pre_roll: float = 3.0, post_roll: float = 5.0, max_duration: float = 120.0):
+                 pre_roll: float = 3.0, post_roll: float = 5.0, max_duration: float = 120.0,
+                 audio_capture: AudioCapture | None = None):
         self.clips_dir = clips_dir
         self.fps = max(fps, 1.0)
         self.width = width
         self.height = height
         self.post_roll = post_roll
         self.max_duration = max_duration
+        self._pre_roll = pre_roll
+        self._audio: AudioCapture | None = audio_capture
 
         self.state = self.IDLE
         self._pre_buf: deque = deque(maxlen=max(1, int(self.fps * pre_roll)))
         self._writer: cv2.VideoWriter | None = None
         self._clip_id: str | None = None
         self._clip_path: Path | None = None
-        self._thumb_path: Path | None = None
         self._start_time: float = 0.0
         self._last_det_time: float = 0.0
         self._best_conf: float = 0.0
         self._best_class: str | None = None
-        self._thumb_saved: bool = False
+        self._wall_start: float = 0.0
 
     def push(self, frame: np.ndarray, det_class: str | None = None,
              det_conf: float = 0.0) -> dict | None:
@@ -317,9 +484,6 @@ class ClipRecorder:
                 self._start(det_class, det_conf, now)
         else:  # RECORDING
             self._writer.write(frame)
-            if not self._thumb_saved:
-                cv2.imwrite(str(self._thumb_path), frame)
-                self._thumb_saved = True
             if now - self._start_time >= self.max_duration:
                 return self._close()
             if det_class is not None:
@@ -340,15 +504,15 @@ class ClipRecorder:
 
     def _start(self, class_name: str, conf: float, now: float):
         self.clips_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+        ts = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%dT%H-%M-%S")
         self._clip_id = f"{ts}_{class_name}"
         self._clip_path = self.clips_dir / f"{self._clip_id}.mp4"
-        self._thumb_path = self.clips_dir / f"{self._clip_id}.jpg"
+        pre_roll_duration = len(self._pre_buf) / self.fps
+        self._wall_start = time.time() - pre_roll_duration
         self._start_time = now
         self._last_det_time = now
         self._best_conf = conf
         self._best_class = class_name
-        self._thumb_saved = False
         self.state = self.RECORDING
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -363,11 +527,19 @@ class ClipRecorder:
         self._writer.release()
         self._writer = None
         self.state = self.IDLE
-        threading.Thread(target=_transcode, args=(self._clip_path,), daemon=True).start()
+
+        audio_path = None
+        if self._audio is not None:
+            audio_path = self._audio.extract(
+                self._wall_start, time.time(), self._clip_path.parent,
+            )
+
+        threading.Thread(
+            target=_transcode, args=(self._clip_path, audio_path), daemon=True,
+        ).start()
         return {
             "id": self._clip_id,
             "path": str(self._clip_path),
-            "thumb": str(self._thumb_path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "class_name": self._best_class,
             "confidence": round(float(self._best_conf), 4),
@@ -582,6 +754,13 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         label = source_label(source)
         print(f"Source: {label} ({width}x{height} @ {fps:.2f} FPS)")
 
+        # Start audio capture for RTSP sources
+        audio_capture = None
+        if kind == "rtsp":
+            audio_capture = AudioCapture(source)
+            if not audio_capture.start():
+                audio_capture = None
+
         # Scale frame down if needed so tile count stays within the batch budget.
         # Only applicable when the backend has a fixed batch size (max_tiles is not None).
         if args.tile_overlap > 0 and backend.max_tiles is not None:
@@ -610,6 +789,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         recorder = ClipRecorder(
             clips_dir, fps, proc_w, proc_h,
             pre_roll=args.pre_roll, post_roll=args.post_roll, max_duration=args.max_clip,
+            audio_capture=audio_capture,
         )
         tracker = Sort(max_age=5, min_hits=1, iou_threshold=0.3)
 
@@ -647,6 +827,8 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                             cap.release()
                             time.sleep(2)
                             cap = open_source(source)
+                            if audio_capture is not None:
+                                audio_capture.restart()
                         continue
                     if args.loop:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -747,4 +929,6 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                 if event_queue is not None:
                     event_queue.put(clip_info)
             cap.release()
+            if audio_capture is not None:
+                audio_capture.stop()
             csv_file.close()
