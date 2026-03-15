@@ -6,7 +6,9 @@ struct ClipBrowserView: View {
     @State private var clips: [Clip] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var clipToDelete: Clip?
+    @State private var isEditing = false
+    @State private var selected: Set<String> = []
+    @State private var showDeleteConfirm = false
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
@@ -26,18 +28,18 @@ struct ClipBrowserView: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(clips) { clip in
-                                NavigationLink(destination: ClipPlayerView(clip: clip)) {
-                                    ClipThumbnailCell(clip: clip) {
+                                if isEditing {
+                                    ClipThumbnailCell(clip: clip, isSelected: selected.contains(clip.id)) {
                                         markReviewed(clip)
                                     }
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        clipToDelete = clip
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
+                                    .onTapGesture { toggleSelection(clip) }
+                                } else {
+                                    NavigationLink(destination: ClipPlayerView(clip: clip)) {
+                                        ClipThumbnailCell(clip: clip) {
+                                            markReviewed(clip)
+                                        }
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -47,9 +49,26 @@ struct ClipBrowserView: View {
             }
             .navigationTitle("Clips")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !clips.isEmpty {
+                        Button(isEditing ? "Done" : "Select") {
+                            isEditing.toggle()
+                            if !isEditing { selected.removeAll() }
+                        }
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { Task { await loadClips() } } label: {
-                        Image(systemName: "arrow.clockwise")
+                    if isEditing && !selected.isEmpty {
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Label("Delete \(selected.count)", systemImage: "trash")
+                        }
+                        .tint(.red)
+                    } else {
+                        Button { Task { await loadClips() } } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
                 }
             }
@@ -61,18 +80,11 @@ struct ClipBrowserView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
-            .alert("Delete Clip?", isPresented: Binding(
-                get: { clipToDelete != nil },
-                set: { if !$0 { clipToDelete = nil } }
-            )) {
-                Button("Delete", role: .destructive) {
-                    if let clip = clipToDelete {
-                        deleteClip(clip)
-                    }
-                }
-                Button("Cancel", role: .cancel) { clipToDelete = nil }
+            .alert("Delete \(selected.count) clip\(selected.count == 1 ? "" : "s")?", isPresented: $showDeleteConfirm) {
+                Button("Delete", role: .destructive) { deleteSelected() }
+                Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will permanently delete the clip and its preview.")
+                Text("This will permanently delete the selected clips and their previews.")
             }
         }
         .task { await loadClips() }
@@ -91,14 +103,28 @@ struct ClipBrowserView: View {
         }
     }
 
-    private func deleteClip(_ clip: Clip) {
+    private func toggleSelection(_ clip: Clip) {
+        if selected.contains(clip.id) {
+            selected.remove(clip.id)
+        } else {
+            selected.insert(clip.id)
+        }
+    }
+
+    private func deleteSelected() {
+        let ids = selected
         Task {
-            do {
-                try await APIService.shared.deleteClip(clipID: clip.id)
-                clips.removeAll { $0.id == clip.id }
-            } catch {
-                errorMessage = error.localizedDescription
+            for id in ids {
+                do {
+                    try await APIService.shared.deleteClip(clipID: id)
+                    clips.removeAll { $0.id == id }
+                } catch {
+                    errorMessage = error.localizedDescription
+                    break
+                }
             }
+            selected.removeAll()
+            isEditing = false
         }
     }
 
@@ -160,6 +186,7 @@ private struct LoopingPreviewPlayer: UIViewRepresentable {
 
 private struct ClipThumbnailCell: View {
     let clip: Clip
+    var isSelected: Bool = false
     let onMarkReviewed: () -> Void
 
     @State private var previewPlayer: AVPlayer?
@@ -180,16 +207,12 @@ private struct ClipThumbnailCell: View {
                     }
                 }
 
-                // Mark reviewed button (top-right)
-                Button(action: onMarkReviewed) {
-                    Image(systemName: clip.reviewed ? "checkmark.circle.fill" : "circle")
-                        .font(.title3)
-                        .foregroundStyle(clip.reviewed ? .green : .white)
-                        .shadow(color: .black.opacity(0.5), radius: 2)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .disabled(clip.reviewed)
+                // Selection / review indicator (top-right)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : (clip.reviewed ? "checkmark.circle.fill" : "circle"))
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? .blue : (clip.reviewed ? .green : .white))
+                    .shadow(color: .black.opacity(0.5), radius: 2)
+                    .frame(width: 44, height: 44)
 
                 // Class label overlay (bottom-left)
                 VStack {

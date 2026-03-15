@@ -234,7 +234,7 @@ def _generate_preview(src: Path):
 # ---------------------------------------------------------------------------
 
 COCO_CLASSES = {
-    "person": 100,
+    "person": 1,
     "bicycle": 1,
     "car": 0,
     "motorcycle": 1,
