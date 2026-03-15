@@ -78,6 +78,34 @@ class ClipReviewHandler(tornado.web.RequestHandler):
         self.set_status(204)
 
 
+class ClipDeleteHandler(tornado.web.RequestHandler):
+    def initialize(self, reviews_path, reviews_lock, clips_dir):
+        self._reviews_path = reviews_path
+        self._reviews_lock = reviews_lock
+        self._clips_dir = clips_dir
+
+    def delete(self, clip_id):
+        with self._reviews_lock:
+            entries = reviews_mod.load(self._reviews_path)
+            entry = next((e for e in entries if e["id"] == clip_id), None)
+            if entry is None:
+                self.set_status(404)
+                return
+            # Delete clip file and preview
+            clip_path = Path(entry["path"])
+            if clip_path.exists():
+                clip_path.unlink()
+            preview = clip_path.with_name(
+                clip_path.stem + "_preview.mp4"
+            )
+            if preview.exists():
+                preview.unlink()
+            # Remove from reviews
+            entries = [e for e in entries if e["id"] != clip_id]
+            reviews_mod.save(self._reviews_path, entries)
+        self.set_status(204)
+
+
 class EventsHandler(tornado.web.RequestHandler):
     """Server-Sent Events endpoint. Streams clip-saved events to connected clients."""
 
@@ -108,12 +136,15 @@ def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
              clips_dir: Path, templates_dir: Path, stats_monitor,
              event_queue) -> tornado.web.Application:
     shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock)
+    delete_shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock,
+                         clips_dir=clips_dir)
     return tornado.web.Application(
         [
             (r"/", IndexHandler),
             (r"/stream", StreamHandler, {"frame_buffer": frame_buffer}),
             (r"/review", ReviewHandler),
             (r"/clips", ClipsHandler, shared),
+            (r"/clips/(.+)/delete", ClipDeleteHandler, delete_shared),
             (r"/clips/(.+)/review", ClipReviewHandler, shared),
             (r"/clips/files/(.*)", tornado.web.StaticFileHandler, {"path": str(clips_dir)}),
             (r"/stats", StatsHandler, {"stats_monitor": stats_monitor}),

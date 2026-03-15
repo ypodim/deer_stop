@@ -334,14 +334,16 @@ def _source_type(source: str | None) -> str:
     return "file"
 
 
-def open_source(source: str | None) -> cv2.VideoCapture:
+def open_source(source: str | None, exit_on_fail: bool = True) -> cv2.VideoCapture | None:
     kind = _source_type(source)
 
     if kind == "usb":
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             print("Error: Could not open webcam /dev/video0")
-            sys.exit(1)
+            if exit_on_fail:
+                sys.exit(1)
+            return None
         return cap
 
     if kind == "rtsp":
@@ -350,18 +352,24 @@ def open_source(source: str | None) -> cv2.VideoCapture:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             print(f"Error: Could not open RTSP stream: {source}")
-            sys.exit(1)
+            if exit_on_fail:
+                sys.exit(1)
+            return None
         return cap
 
     # file
     path = Path(source)
     if not path.exists():
         print(f"Error: Video file not found: {path}")
-        sys.exit(1)
+        if exit_on_fail:
+            sys.exit(1)
+        return None
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         print(f"Error: Could not open video: {path}")
-        sys.exit(1)
+        if exit_on_fail:
+            sys.exit(1)
+        return None
     return cap
 
 
@@ -805,6 +813,8 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         _ema_frame_ms: float | None = None
         _ema_stream_fps: float | None = None
         _prev_loop_t: float | None = None
+        _rtsp_backoff: float = 2.0
+        _RTSP_BACKOFF_MAX: float = 60.0
 
         try:
             while not stop_event.is_set():
@@ -823,17 +833,24 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                 if not ret:
                     if kind in ("usb", "rtsp"):
                         if kind == "rtsp":
-                            print("RTSP: lost connection, reconnecting...")
+                            print(f"RTSP: lost connection, retrying in {_rtsp_backoff:.0f}s...")
                             cap.release()
-                            time.sleep(2)
-                            cap = open_source(source)
-                            if audio_capture is not None:
-                                audio_capture.restart()
+                            time.sleep(_rtsp_backoff)
+                            new_cap = open_source(source, exit_on_fail=False)
+                            if new_cap is not None:
+                                cap = new_cap
+                                print("RTSP: reconnected")
+                                _rtsp_backoff = 2.0
+                                if audio_capture is not None:
+                                    audio_capture.restart()
+                            else:
+                                _rtsp_backoff = min(_rtsp_backoff * 2, _RTSP_BACKOFF_MAX)
                         continue
                     if args.loop:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
                     break
+                _rtsp_backoff = 2.0  # reset on successful read
 
                 if proc_w != width or proc_h != height:
                     frame = cv2.resize(frame, (proc_w, proc_h))

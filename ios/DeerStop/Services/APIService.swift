@@ -57,6 +57,13 @@ final class APIService: ObservableObject {
         _ = try await URLSession.shared.data(for: req)
     }
 
+    func deleteClip(clipID: String) async throws {
+        guard let req = request(path: "/api/clips/\(clipID)/delete", method: "DELETE") else {
+            throw URLError(.badURL)
+        }
+        _ = try await URLSession.shared.data(for: req)
+    }
+
     func clipVideoURL(filename: String) -> URL? {
         guard let base = baseURL else { return nil }
         return URL(string: "/api/clips/files/\(filename)", relativeTo: base)

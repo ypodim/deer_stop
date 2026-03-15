@@ -6,6 +6,7 @@ struct ClipBrowserView: View {
     @State private var clips: [Clip] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var clipToDelete: Clip?
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
@@ -31,6 +32,13 @@ struct ClipBrowserView: View {
                                     }
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        clipToDelete = clip
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
                             }
                         }
                         .padding()
@@ -53,6 +61,19 @@ struct ClipBrowserView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
+            .alert("Delete Clip?", isPresented: Binding(
+                get: { clipToDelete != nil },
+                set: { if !$0 { clipToDelete = nil } }
+            )) {
+                Button("Delete", role: .destructive) {
+                    if let clip = clipToDelete {
+                        deleteClip(clip)
+                    }
+                }
+                Button("Cancel", role: .cancel) { clipToDelete = nil }
+            } message: {
+                Text("This will permanently delete the clip and its preview.")
+            }
         }
         .task { await loadClips() }
     }
@@ -67,6 +88,17 @@ struct ClipBrowserView: View {
                 .sorted { $0.id > $1.id }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deleteClip(_ clip: Clip) {
+        Task {
+            do {
+                try await APIService.shared.deleteClip(clipID: clip.id)
+                clips.removeAll { $0.id == clip.id }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -148,15 +180,18 @@ private struct ClipThumbnailCell: View {
                     }
                 }
 
-                // Unreviewed indicator
-                if !clip.reviewed {
-                    Circle()
-                        .fill(.orange)
-                        .frame(width: 10, height: 10)
-                        .padding(6)
+                // Mark reviewed button (top-right)
+                Button(action: onMarkReviewed) {
+                    Image(systemName: clip.reviewed ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(clip.reviewed ? .green : .white)
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
+                .disabled(clip.reviewed)
 
-                // Class label overlay
+                // Class label overlay (bottom-left)
                 VStack {
                     Spacer()
                     HStack {
@@ -178,11 +213,6 @@ private struct ClipThumbnailCell: View {
                 .font(.caption)
                 .lineLimit(1)
                 .foregroundStyle(.primary)
-
-            Button("Mark reviewed", action: onMarkReviewed)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .disabled(clip.reviewed)
         }
         .task { await loadPreview() }
         .onDisappear {
