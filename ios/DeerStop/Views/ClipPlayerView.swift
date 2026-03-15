@@ -23,7 +23,7 @@ struct ClipPlayerView: View {
             // Pass the Bearer auth header directly to AVURLAsset so nginx lets the request through
             var options: [String: Any] = [:]
             if let token = KeychainService.load(forKey: "authToken") {
-                options[AVURLAssetHTTPHeaderFieldsKey] = ["Authorization": "Bearer \(token)"]
+                options["AVURLAssetHTTPHeaderFieldsKey"] = ["Authorization": "Bearer \(token)"]
             }
             let asset = AVURLAsset(url: url, options: options)
             player = AVPlayer(playerItem: AVPlayerItem(asset: asset))

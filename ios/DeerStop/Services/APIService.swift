@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// REST client for the DeerStop detection server API (proxied via Node/nginx).

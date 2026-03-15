@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Message types exchanged with the Node signaling server.
@@ -27,7 +28,7 @@ protocol SignalingDelegate: AnyObject {
 }
 
 @MainActor
-final class SignalingService: NSObject, URLSessionWebSocketDelegate {
+final class SignalingService: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     weak var delegate: SignalingDelegate?
 
     private var webSocketTask: URLSessionWebSocketTask?
