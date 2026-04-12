@@ -18,8 +18,20 @@
            text-decoration: none; box-sizing: border-box; font-size: 0.9em; }
     .btn-primary { background: #4af; color: #000; }
     .btn-primary:hover { background: #6cf; }
+    .btn-danger { background: #e44; color: #fff; }
+    .btn-danger:hover { background: #f66; }
+    .btn-bar { display: flex; gap: 4px; margin-top: 4px; }
+    .btn-bar .btn { flex: 1; }
     .empty { color: #666; font-style: italic; margin-top: 20px; }
     #count { color: #888; font-size: 0.9em; }
+    #toolbar { display: none; margin-bottom: 16px; }
+    #toolbar.active { display: flex; gap: 12px; align-items: center; }
+    #toolbar button { border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+    #select-all-btn { background: #555; color: #eee; }
+    #delete-selected-btn { background: #e44; color: #fff; }
+    .clip { position: relative; }
+    .clip .select-cb { position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; accent-color: #4af; display: none; cursor: pointer; }
+    .selecting .clip .select-cb { display: block; }
   </style>
 </head>
 <body>
@@ -29,41 +41,95 @@
     <a href="/review">&#9744; Review</a>
   </nav>
   <p id="count"></p>
+  <div id="toolbar">
+    <button id="select-all-btn" onclick="toggleSelectAll()">Select All</button>
+    <button id="delete-selected-btn" onclick="deleteSelected()">Delete Selected (0)</button>
+  </div>
   <div id="content">Loading...</div>
   <script>
+    let selecting = false;
+
     async function load() {
       const res = await fetch('/clips');
       const clips = await res.json();
-      const pending = clips.filter(c => !c.reviewed);
+      clips.sort((a, b) => b.id.localeCompare(a.id));
       document.getElementById('count').textContent =
-        pending.length + ' unreviewed detection' + (pending.length !== 1 ? 's' : '');
+        clips.length + ' clip' + (clips.length !== 1 ? 's' : '') +
+        ' (' + clips.filter(c => !c.reviewed).length + ' unreviewed)';
       const el = document.getElementById('content');
-      if (pending.length === 0) {
-        el.innerHTML = '<p class="empty">No unreviewed detections.</p>';
+      if (clips.length === 0) {
+        el.innerHTML = '<p class="empty">No clips.</p>';
         return;
       }
-      el.innerHTML = '<div class="clips">' + pending.map(c => {
+      el.innerHTML = '<div class="clips">' + clips.map(c => {
         const dt = new Date(c.timestamp).toLocaleString();
         const pct = (c.confidence * 100).toFixed(0);
         const id = encodeURIComponent(c.id);
+        const reviewed = c.reviewed ? ' (reviewed)' : '';
         return `<div class="clip" id="clip-${c.id}">
+          <input type="checkbox" class="select-cb" data-id="${c.id}" onchange="updateSelectedCount()">
           <video controls preload="metadata" src="/clips/files/${id}.mp4"></video>
-          <div class="clip-class">${c.class_name}</div>
+          <div class="clip-class">${c.class_name}${reviewed}</div>
           <div class="clip-info">${dt}<br>Confidence: ${pct}%</div>
-          <button class="btn btn-primary" onclick="markReviewed('${c.id}')">&#10003; Mark Reviewed</button>
+          <div class="btn-bar">
+            <button class="btn btn-primary" onclick="markReviewed('${c.id}')">&#10003; Review</button>
+            <button class="btn btn-danger" onclick="deleteClip('${c.id}')">&#10005; Delete</button>
+          </div>
         </div>`;
       }).join('') + '</div>';
+      document.getElementById('toolbar').classList.add('active');
+    }
+
+    function updateSelectedCount() {
+      const checked = document.querySelectorAll('.select-cb:checked').length;
+      document.getElementById('delete-selected-btn').textContent = 'Delete Selected (' + checked + ')';
+    }
+
+    function toggleSelectAll() {
+      const cbs = document.querySelectorAll('.select-cb');
+      const allChecked = [...cbs].every(cb => cb.checked);
+      cbs.forEach(cb => cb.checked = !allChecked);
+      selecting = !allChecked;
+      document.getElementById('content').classList.toggle('selecting', true);
+      updateSelectedCount();
+    }
+
+    async function deleteClip(id) {
+      if (!confirm('Delete this clip?')) return;
+      await fetch('/clips/' + encodeURIComponent(id) + '/delete', {method: 'DELETE'});
+      const el = document.getElementById('clip-' + id);
+      if (el) el.remove();
+      updateCount();
+    }
+
+    async function deleteSelected() {
+      const cbs = document.querySelectorAll('.select-cb:checked');
+      if (cbs.length === 0) return;
+      if (!confirm('Delete ' + cbs.length + ' clip(s)?')) return;
+      for (const cb of cbs) {
+        const id = cb.dataset.id;
+        await fetch('/clips/' + encodeURIComponent(id) + '/delete', {method: 'DELETE'});
+        const el = document.getElementById('clip-' + id);
+        if (el) el.remove();
+      }
+      updateCount();
+      updateSelectedCount();
     }
 
     async function markReviewed(id) {
       await fetch('/clips/' + encodeURIComponent(id) + '/review', {method: 'POST'});
       const el = document.getElementById('clip-' + id);
-      if (el) el.remove();
-      const remaining = document.querySelectorAll('.clip').length;
+      const cls = el?.querySelector('.clip-class');
+      if (cls && !cls.textContent.includes('(reviewed)')) cls.textContent += ' (reviewed)';
+      updateCount();
+    }
+
+    function updateCount() {
+      const total = document.querySelectorAll('.clip').length;
       document.getElementById('count').textContent =
-        remaining + ' unreviewed detection' + (remaining !== 1 ? 's' : '');
-      if (remaining === 0)
-        document.getElementById('content').innerHTML = '<p class="empty">No unreviewed detections.</p>';
+        total + ' clip' + (total !== 1 ? 's' : '');
+      if (total === 0)
+        document.getElementById('content').innerHTML = '<p class="empty">No clips.</p>';
     }
 
     load();

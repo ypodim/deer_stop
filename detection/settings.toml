@@ -2,7 +2,7 @@
 port = 8080
 # Bind address. Use 127.0.0.1 when behind an autossh tunnel (default).
 # Change to 0.0.0.0 for direct LAN access without a tunnel.
-host = "127.0.0.1"
+host = "0.0.0.0"
 
 [source]
 # Set url in settings.local.toml (gitignored).
