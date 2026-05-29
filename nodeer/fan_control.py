@@ -16,7 +16,7 @@ import termios
 import urllib.request
 
 HOST = "http://nodeer:8080"
-STEP = 0.5
+STEP = 0.1
 MIN_DUTY = 5.0
 MAX_DUTY = 9.0
 
