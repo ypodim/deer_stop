@@ -144,8 +144,8 @@ def make_handler(fan: FanController):
 
 def main():
     parser = argparse.ArgumentParser(description="Hardware PWM fan controller")
-    parser.add_argument("--freq", type=int, default=25000,
-                        help="PWM frequency in Hz (default: 25000)")
+    parser.add_argument("--freq", type=int, default=50,
+                        help="PWM frequency in Hz (default: 50)")
     parser.add_argument("--duty", type=float, default=5.0,
                         help="Duty cycle 0-100 (default: 5)")
     parser.add_argument("--port", type=int, default=8080,
