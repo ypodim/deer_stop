@@ -67,11 +67,17 @@ def main():
         print(f"Cannot reach {HOST} — is fan.py running on nodeer?")
         sys.exit(1)
 
-    duty = status["duty_pct"]
-    running = status["running"]
+    # Always start at minimum duty
+    result = post(f"/duty?value={MIN_DUTY}")
+    if result:
+        duty = result["duty_pct"]
+        running = result["running"]
+    else:
+        duty = MIN_DUTY
+        running = status["running"]
 
     print("Fan Control — nodeer")
-    print(f"Connected. Current: {duty}% {'(running)' if running else '(stopped)'}")
+    print(f"Connected. Set duty to {duty}%")
     print()
     draw(duty, running)
 
