@@ -17,8 +17,6 @@ Usage:
 HTTP API:
     GET  /              → current status (JSON)
     POST /duty?value=75 → set duty cycle to 75%
-    POST /stop          → stop PWM (duty 0, disabled)
-    POST /start         → restart PWM at last duty cycle
 """
 
 import argparse
@@ -58,12 +56,15 @@ class FanController:
         self.chan = chan
         self.freq_hz = freq_hz
         self.period_ns = int(1_000_000_000 / freq_hz)
-        self.duty_pct = duty_pct
+        self.max_duty = 8
+        
         self.running = False
 
-    def start(self, duty_pct: float | None = None):
-        if duty_pct is not None:
-            self.duty_pct = duty_pct
+        if duty_pct is None:
+            self.duty_pct = 0
+        else:
+            self.duty_pct = min(duty_pct, self.max_duty)
+
         duty_ns = int(self.period_ns * self.duty_pct / 100.0)
         (self.chan / "enable").write_text("0")
         (self.chan / "period").write_text(str(self.period_ns))
@@ -124,12 +125,6 @@ def make_handler(fan: FanController):
                     return
                 fan.set_duty(value)
                 self._json(200, fan.status())
-            elif path == "/stop":
-                fan.stop()
-                self._json(200, fan.status())
-            elif path == "/start":
-                fan.start()
-                self._json(200, fan.status())
             else:
                 self._json(404, {"error": "not found"})
 
@@ -151,8 +146,8 @@ def main():
     parser = argparse.ArgumentParser(description="Hardware PWM fan controller")
     parser.add_argument("--freq", type=int, default=25000,
                         help="PWM frequency in Hz (default: 25000)")
-    parser.add_argument("--duty", type=float, default=100.0,
-                        help="Duty cycle 0-100 (default: 100)")
+    parser.add_argument("--duty", type=float, default=5.0,
+                        help="Duty cycle 0-100 (default: 5)")
     parser.add_argument("--port", type=int, default=8080,
                         help="HTTP server port (default: 8080)")
     parser.add_argument("--pwm-chip", type=int, default=0,
@@ -168,7 +163,6 @@ def main():
 
     chan = export_channel(args.pwm_chip, args.pwm_channel)
     fan = FanController(chan, args.freq, args.duty)
-    fan.start()
 
     def shutdown(sig, frame):
         fan.stop()
