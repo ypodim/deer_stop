@@ -1,0 +1,13 @@
+[Unit]
+Description=Deer deterrent fan controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pol/deer_stop/nodeer/fan.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
