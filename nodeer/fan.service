@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/pol/deer_stop/nodeer/fan.py
+ExecStart=/usr/bin/python3 -u /home/pol/deer_stop/nodeer/fan.py
 Restart=on-failure
 RestartSec=5
 
