@@ -16,7 +16,9 @@ import termios
 import urllib.request
 
 HOST = "http://nodeer:8080"
-STEP = 5
+STEP = 0.5
+MIN_DUTY = 5.0
+MAX_DUTY = 9.0
 
 
 def post(path: str) -> dict | None:
@@ -81,24 +83,24 @@ def main():
             if key in ("q", "\x03", "esc"):  # q, Ctrl-C, Esc
                 break
             elif key == "up":
-                duty = min(100, duty + STEP)
+                duty = min(MAX_DUTY, duty + STEP)
                 result = post(f"/duty?value={duty}")
                 if result:
                     duty = result["duty_pct"]
                     running = result["running"]
             elif key == "down":
-                duty = max(0, duty - STEP)
+                duty = max(MIN_DUTY, duty - STEP)
                 result = post(f"/duty?value={duty}")
                 if result:
                     duty = result["duty_pct"]
                     running = result["running"]
             elif key == "0":
-                result = post("/stop")
+                result = post(f"/duty?value={MIN_DUTY}")
                 if result:
                     duty = result["duty_pct"]
-                    running = False
+                    running = result["running"]
             elif key == "m":
-                result = post("/duty?value=100")
+                result = post(f"/duty?value={MAX_DUTY}")
                 if result:
                     duty = result["duty_pct"]
                     running = result["running"]
