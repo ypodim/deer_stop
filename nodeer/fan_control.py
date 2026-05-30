@@ -18,7 +18,7 @@ import urllib.request
 HOST = "http://nodeer:8080"
 STEP = 0.1
 MIN_DUTY = 5.0
-MAX_DUTY = 9.0
+MAX_DUTY = 8.0
 
 
 def post(path: str) -> dict | None:
@@ -102,6 +102,11 @@ def main():
                     running = result["running"]
             elif key == "0":
                 result = post(f"/duty?value={MIN_DUTY}")
+                if result:
+                    duty = result["duty_pct"]
+                    running = result["running"]
+            elif int(key) in [6,7,8]:
+                result = post(f"/duty?value={key}")
                 if result:
                     duty = result["duty_pct"]
                     running = result["running"]
