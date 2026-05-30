@@ -732,7 +732,7 @@ def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
 
 def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None,
-        event_queue: EventQueue | None = None):
+        event_queue: EventQueue | None = None, notify_email: str = ""):
     """Blocking inference loop. Intended to run in a daemon thread."""
     global _csv_writer
 
@@ -934,6 +934,9 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                     reviews_mod.add(reviews_path, reviews_lock, clip_info)
                     if event_queue is not None:
                         event_queue.put(clip_info)
+                    if notify_email:
+                        import notify
+                        notify.on_clip(clip_info, notify_email)
 
                 elapsed = time.time() - start
                 if kind != "rtsp" and elapsed < frame_time:

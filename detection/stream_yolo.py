@@ -48,6 +48,9 @@ DEFAULTS = {
         "turn_url":      "",
         "auth_token":    "",
     },
+    "notify": {
+        "email": "",
+    },
 }
 
 
@@ -101,6 +104,7 @@ def load_settings() -> SimpleNamespace:
         node_signaling_url = get("node", "signaling_url"),
         node_turn_url      = get("node", "turn_url"),
         node_auth_token    = get("node", "auth_token"),
+        notify_email       = get("notify", "email"),
     )
 
 
@@ -130,7 +134,7 @@ def main():
     stop_event = threading.Event()
     det_thread = threading.Thread(
         target=detector.run,
-        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store, event_queue),
+        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store, event_queue, args.notify_email),
         daemon=True,
     )
     det_thread.start()

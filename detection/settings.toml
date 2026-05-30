@@ -27,6 +27,9 @@ signaling_url = "wss://node.polychronis.gr/signaling"
 turn_url = "turn:node.polychronis.gr:3478"
 auth_token = ""
 
+[notify]
+email = ""  # Email address for detection alerts (empty = disabled)
+
 [recording]
 log = "detections.log"
 clips_dir = "/home/pol/ws/deerstop/clips"
