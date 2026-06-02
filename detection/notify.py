@@ -13,9 +13,10 @@ import time
 import urllib.request
 
 EMAIL_COOLDOWN_SECS = 300   # 5 min — reset "last class" after this gap
-FAN_COOLDOWN_SECS = 600     # 10 min — don't re-trigger fan within this window
+FAN_COOLDOWN_SECS = 300     # 5 min — don't re-trigger fan within this window
 FAN_ON_SECS = 10            # how long the fan stays on
 FAN_DUTY = 7
+FAN_MIN_DUTY = 5
 FAN_URL = "http://nodeer:8080/duty?value="
 
 _last_class: str | None = None
@@ -51,10 +52,10 @@ def _fan_set(duty: float):
 
 
 def _fan_on_then_off():
-    """Turn fan on, wait, turn off."""
+    """Turn fan on, wait, return to minimum."""
     _fan_set(FAN_DUTY)
     time.sleep(FAN_ON_SECS)
-    _fan_set(0)
+    _fan_set(FAN_MIN_DUTY)
 
 
 def on_clip(clip_info: dict, email_to: str):
