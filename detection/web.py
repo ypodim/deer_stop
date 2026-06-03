@@ -62,6 +62,17 @@ class StatsHandler(tornado.web.RequestHandler):
         self.write(json.dumps(self._monitor.get()))
 
 
+class MetricsHandler(tornado.web.RequestHandler):
+    def get(self):
+        try:
+            import notify
+            metrics = notify.get_metrics()
+        except Exception:
+            metrics = ""
+        self.set_header("Content-Type", "text/plain; version=0.0.4")
+        self.write(metrics)
+
+
 class ClipReviewHandler(tornado.web.RequestHandler):
     def initialize(self, reviews_path, reviews_lock):
         self._reviews_path = reviews_path
@@ -148,6 +159,7 @@ def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
             (r"/clips/(.+)/review", ClipReviewHandler, shared),
             (r"/clips/files/(.*)", tornado.web.StaticFileHandler, {"path": str(clips_dir)}),
             (r"/stats", StatsHandler, {"stats_monitor": stats_monitor}),
+            (r"/metrics", MetricsHandler),
             (r"/events", EventsHandler, {"event_queue": event_queue}),
         ],
         template_path=str(templates_dir),

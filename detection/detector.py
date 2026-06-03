@@ -926,7 +926,12 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                         if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100]
                 if high:
                     best = max(high, key=lambda d: d[4])
-                    clip_info = recorder.push(annotated, COCO_NAMES[int(best[5])], best[4])
+                    best_class = COCO_NAMES[int(best[5])]
+                    best_conf = best[4]
+                    if notify_email:
+                        import notify
+                        notify.on_detection(best_class, best_conf, notify_email)
+                    clip_info = recorder.push(annotated, best_class, best_conf)
                 else:
                     clip_info = recorder.push(annotated)
 
