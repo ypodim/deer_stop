@@ -135,7 +135,14 @@ def on_clip(clip_info: dict, email_to: str):
 
     if send_email:
         conf = clip_info.get("confidence", 0)
-        ts = clip_info.get("timestamp", "")
+        ts_raw = clip_info.get("timestamp", "")
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            dt = datetime.fromisoformat(ts_raw).astimezone(ZoneInfo("America/Los_Angeles"))
+            ts = dt.strftime("%Y-%m-%d %I:%M:%S %p PT")
+        except Exception:
+            ts = ts_raw
         threading.Thread(target=_send_email, args=(
             f"DeerStop: {class_name} detected",
             f"{class_name} detected at {ts} (confidence: {conf:.0%})",
