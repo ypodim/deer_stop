@@ -85,8 +85,8 @@ class FanController:
         if self.running:
             duty_ns = int(self.period_ns * self.duty_pct / 100.0)
             (self.chan / "duty_cycle").write_text(str(duty_ns))
-        # Track non-zero transitions as triggers
-        if old == 0 and self.duty_pct > 0:
+        # Track upward duty changes as triggers (e.g. 5% → 7%)
+        if self.duty_pct > old:
             self.trigger_count += 1
         self.duty_changes.append((time.time(), old, self.duty_pct))
         print(f"PWM: duty → {self.duty_pct}%")
