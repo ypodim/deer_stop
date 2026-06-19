@@ -91,6 +91,21 @@ class FanController:
         self.duty_changes.append((time.time(), old, self.duty_pct))
         print(f"PWM: duty → {self.duty_pct}%")
 
+    def trigger(self, duty: float = 7, duration: float = 10, min_duty: float = 5):
+        """Ramp to duty% for duration seconds, then return to min_duty%.
+        If already triggered, resets the timer."""
+        if hasattr(self, '_trigger_timer') and self._trigger_timer is not None:
+            self._trigger_timer.cancel()
+        self.set_duty(duty)
+        self._trigger_timer = threading.Timer(duration, self._trigger_off, args=(min_duty,))
+        self._trigger_timer.daemon = True
+        self._trigger_timer.start()
+        print(f"PWM: trigger {duty}% for {duration}s, then {min_duty}%")
+
+    def _trigger_off(self, min_duty: float):
+        self._trigger_timer = None
+        self.set_duty(min_duty)
+
     def stop(self):
         try:
             (self.chan / "enable").write_text("0")
@@ -198,7 +213,10 @@ def make_handler(fan: FanController):
             path = parsed.path
             params = parse_qs(parsed.query)
 
-            if path == "/duty":
+            if path == "/trigger":
+                fan.trigger()
+                self._json(200, fan.status())
+            elif path == "/duty":
                 raw = params.get("value", [None])[0]
                 if raw is None:
                     self._json(400, {"error": "missing ?value= parameter"})

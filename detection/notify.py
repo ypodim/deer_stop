@@ -19,10 +19,7 @@ import urllib.request
 
 EMAIL_COOLDOWN_SECS = 300   # 5 min — reset "last class" after this gap
 FAN_COOLDOWN_SECS = 300     # 5 min — don't re-trigger fan within this window
-FAN_ON_SECS = 10            # how long the fan stays on
-FAN_DUTY = 7
-FAN_MIN_DUTY = 5
-FAN_URL = "http://nodeer:8080/duty?value="
+FAN_TRIGGER_URL = "http://nodeer:8080/trigger"
 
 _last_class: str | None = None
 _last_email_time: float = 0
@@ -61,34 +58,25 @@ def _send_email(subject: str, body: str, to: str):
         print(f"Notify: email failed — {e}")
 
 
-def _fan_set(duty: float) -> float:
-    """Set fan duty cycle via HTTP. Returns response time in ms."""
-    global _last_fan_request_time, _last_fan_response_time, _fan_http_ms
+def _fan_trigger():
+    """Send trigger request to fan service (handles on/off cycle server-side)."""
+    global _last_fan_request_time, _last_fan_response_time, _fan_http_ms, _detection_to_fan_ms
+    t0 = _last_detection_time
     _last_fan_request_time = time.time()
     try:
-        req = urllib.request.Request(f"{FAN_URL}{duty}", method="POST")
+        req = urllib.request.Request(FAN_TRIGGER_URL, method="POST")
         with urllib.request.urlopen(req, timeout=5) as resp:
             _last_fan_response_time = time.time()
             _fan_http_ms = (_last_fan_response_time - _last_fan_request_time) * 1000
-            print(f"Notify: fan → {duty}% (HTTP {_fan_http_ms:.0f}ms)")
-            return _fan_http_ms
+            if t0 > 0:
+                _detection_to_fan_ms = (_last_fan_response_time - t0) * 1000
+                print(f"Notify: fan triggered (HTTP {_fan_http_ms:.0f}ms, detection→fan {_detection_to_fan_ms:.0f}ms)")
+            else:
+                print(f"Notify: fan triggered (HTTP {_fan_http_ms:.0f}ms)")
     except Exception as e:
         _last_fan_response_time = time.time()
         _fan_http_ms = (_last_fan_response_time - _last_fan_request_time) * 1000
-        print(f"Notify: fan request failed — {e} ({_fan_http_ms:.0f}ms)")
-        return _fan_http_ms
-
-
-def _fan_on_then_off():
-    """Turn fan on, wait, return to minimum."""
-    global _detection_to_fan_ms
-    t0 = _last_detection_time
-    _fan_set(FAN_DUTY)
-    if t0 > 0:
-        _detection_to_fan_ms = (time.time() - t0) * 1000
-        print(f"Notify: detection→fan = {_detection_to_fan_ms:.0f}ms")
-    time.sleep(FAN_ON_SECS)
-    _fan_set(FAN_MIN_DUTY)
+        print(f"Notify: fan trigger failed — {e} ({_fan_http_ms:.0f}ms)")
 
 
 def on_detection(class_name: str, conf: float, notify_email: str):
@@ -106,7 +94,7 @@ def on_detection(class_name: str, conf: float, notify_email: str):
 
     if trigger_fan:
         print(f"Notify: {class_name} detected ({conf:.0%}), triggering fan")
-        threading.Thread(target=_fan_on_then_off, daemon=True).start()
+        threading.Thread(target=_fan_trigger, daemon=True).start()
     else:
         remaining = int(FAN_COOLDOWN_SECS - (now - _last_fan_time))
         print(f"Notify: {class_name} detected, fan cooldown ({remaining}s remaining)")
