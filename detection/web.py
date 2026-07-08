@@ -17,14 +17,20 @@ class IndexHandler(tornado.web.RequestHandler):
 
 
 class StreamHandler(tornado.web.RequestHandler):
-    def initialize(self, frame_buffer):
-        self._frame_buffer = frame_buffer
+    def initialize(self, streams, default_name):
+        self._streams = streams
+        self._default_name = default_name
 
-    async def get(self):
+    async def get(self, name=None):
+        frame_buffer = self._streams.get(name or self._default_name)
+        if frame_buffer is None:
+            self.set_status(404)
+            self.write(f"No such camera: {name}")
+            return
         self.set_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         try:
             while True:
-                frame = self._frame_buffer.get_or_none()
+                frame = frame_buffer.get_or_none()
                 if frame is not None:
                     self.write(b"--frame\r\n")
                     self.write(b"Content-Type: image/jpeg\r\n\r\n")
@@ -143,16 +149,19 @@ class EventsHandler(tornado.web.RequestHandler):
             self._event_queue.unsubscribe(q)
 
 
-def make_app(frame_buffer, reviews_path: Path, reviews_lock: threading.Lock,
+def make_app(streams, reviews_path: Path, reviews_lock: threading.Lock,
              clips_dir: Path, templates_dir: Path, stats_monitor,
              event_queue) -> tornado.web.Application:
     shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock)
     delete_shared = dict(reviews_path=reviews_path, reviews_lock=reviews_lock,
                          clips_dir=clips_dir)
+    default_name = next(iter(streams))
+    stream_cfg = {"streams": streams, "default_name": default_name}
     return tornado.web.Application(
         [
             (r"/", IndexHandler),
-            (r"/stream", StreamHandler, {"frame_buffer": frame_buffer}),
+            (r"/stream", StreamHandler, stream_cfg),
+            (r"/stream/([\w-]+)", StreamHandler, stream_cfg),
             (r"/review", ReviewHandler),
             (r"/clips", ClipsHandler, shared),
             (r"/clips/(.+)/delete", ClipDeleteHandler, delete_shared),

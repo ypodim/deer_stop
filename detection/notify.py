@@ -79,13 +79,16 @@ def _fan_trigger():
         print(f"Notify: fan trigger failed — {e} ({_fan_http_ms:.0f}ms)")
 
 
-def on_detection(class_name: str, conf: float, notify_email: str):
+def on_detection(class_name: str, conf: float, notify_email: str, camera: str = ""):
     """Called immediately when a high-priority detection fires.
-    Triggers fan instantly, no waiting for clip to close."""
+    Triggers fan instantly, no waiting for clip to close.
+
+    The fan cooldown is shared across all cameras (there is only one fan)."""
     global _last_detection_time, _last_fan_time
 
     _last_detection_time = time.time()
     now = _last_detection_time
+    tag = f"[{camera}] " if camera else ""
 
     with _lock:
         trigger_fan = now - _last_fan_time >= FAN_COOLDOWN_SECS
@@ -93,11 +96,11 @@ def on_detection(class_name: str, conf: float, notify_email: str):
             _last_fan_time = now
 
     if trigger_fan:
-        print(f"Notify: {class_name} detected ({conf:.0%}), triggering fan")
+        print(f"Notify: {tag}{class_name} detected ({conf:.0%}), triggering fan")
         threading.Thread(target=_fan_trigger, daemon=True).start()
     else:
         remaining = int(FAN_COOLDOWN_SECS - (now - _last_fan_time))
-        print(f"Notify: {class_name} detected, fan cooldown ({remaining}s remaining)")
+        print(f"Notify: {tag}{class_name} detected, fan cooldown ({remaining}s remaining)")
 
 
 def on_clip(clip_info: dict, email_to: str):
@@ -105,8 +108,11 @@ def on_clip(clip_info: dict, email_to: str):
     global _last_class, _last_email_time, _last_clip_close_time, _detection_to_clip_ms
 
     class_name = clip_info.get("class_name", "unknown")
+    camera = clip_info.get("camera", "")
     now = time.time()
     _last_clip_close_time = now
+    # Dedup key is per (camera, class) so different cameras still notify.
+    dedup_key = f"{camera}:{class_name}"
 
     if _last_detection_time > 0:
         _detection_to_clip_ms = (now - _last_detection_time) * 1000
@@ -116,9 +122,9 @@ def on_clip(clip_info: dict, email_to: str):
         if now - _last_email_time > EMAIL_COOLDOWN_SECS:
             _last_class = None
 
-        send_email = class_name != _last_class
+        send_email = dedup_key != _last_class
         if send_email:
-            _last_class = class_name
+            _last_class = dedup_key
             _last_email_time = now
 
     if send_email:
@@ -131,13 +137,14 @@ def on_clip(clip_info: dict, email_to: str):
             ts = dt.strftime("%Y-%m-%d %I:%M:%S %p PT")
         except Exception:
             ts = ts_raw
+        where = f" on {camera}" if camera else ""
         threading.Thread(target=_send_email, args=(
-            f"DeerStop: {class_name} detected",
-            f"{class_name} detected at {ts} (confidence: {conf:.0%})",
+            f"DeerStop: {class_name} detected{where}",
+            f"{class_name} detected{where} at {ts} (confidence: {conf:.0%})",
             email_to,
         ), daemon=True).start()
     else:
-        print(f"Notify: skipping duplicate email for {class_name}")
+        print(f"Notify: skipping duplicate email for {dedup_key}")
 
 
 def get_metrics() -> str:

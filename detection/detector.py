@@ -250,7 +250,7 @@ COCO_CLASSES = {
     "bench": 0,
     "bird": 1,
     "cat": 1,
-    "dog": 1,
+    "dog": 100,
     "horse": 1,
     "sheep": 100,
     "cow": 100,
@@ -317,8 +317,8 @@ COCO_CLASSES = {
 }
 COCO_NAMES = list(COCO_CLASSES.keys())
 
-# Module-level CSV writer; initialised inside run()
-_csv_writer = None
+# Shared CSV write lock. Each run() owns its own writer (one per camera thread);
+# the lock serialises appends to the shared detections.log.
 _csv_lock = threading.Lock()
 
 
@@ -457,7 +457,7 @@ class ClipRecorder:
 
     def __init__(self, clips_dir: Path, fps: float, width: int, height: int,
                  pre_roll: float = 3.0, post_roll: float = 5.0, max_duration: float = 120.0,
-                 audio_capture: AudioCapture | None = None):
+                 audio_capture: AudioCapture | None = None, camera_name: str = "cam"):
         self.clips_dir = clips_dir
         self.fps = max(fps, 1.0)
         self.width = width
@@ -466,6 +466,7 @@ class ClipRecorder:
         self.max_duration = max_duration
         self._pre_roll = pre_roll
         self._audio: AudioCapture | None = audio_capture
+        self.camera_name = camera_name
 
         self.state = self.IDLE
         self._pre_buf: deque = deque(maxlen=max(1, int(self.fps * pre_roll)))
@@ -513,7 +514,7 @@ class ClipRecorder:
     def _start(self, class_name: str, conf: float, now: float):
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%dT%H-%M-%S")
-        self._clip_id = f"{ts}_{class_name}"
+        self._clip_id = f"{ts}_{self.camera_name}_{class_name}"
         self._clip_path = self.clips_dir / f"{self._clip_id}.mp4"
         pre_roll_duration = len(self._pre_buf) / self.fps
         self._wall_start = time.time() - pre_roll_duration
@@ -550,6 +551,7 @@ class ClipRecorder:
             "path": str(self._clip_path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "class_name": self._best_class,
+            "camera": self.camera_name,
             "confidence": round(float(self._best_conf), 4),
             "reviewed": False,
         }
@@ -633,13 +635,13 @@ def _compute_downscale(frame_w: int, frame_h: int,
     return max(1, int(frame_w * lo)), max(1, int(frame_h * lo))
 
 
-def _log_detection(class_name, class_id, conf, x1, y1, x2, y2):
-    if _csv_writer is None:
+def _log_detection(csv_writer, camera, class_name, class_id, conf, x1, y1, x2, y2):
+    if csv_writer is None:
         return
     ts = datetime.now(_TZ_PST).isoformat()
     with _csv_lock:
-        _csv_writer.writerow([ts, class_name, class_id, f"{conf:.4f}",
-                              f"{x1:.1f}", f"{y1:.1f}", f"{x2:.1f}", f"{y2:.1f}"])
+        csv_writer.writerow([ts, camera, class_name, class_id, f"{conf:.4f}",
+                             f"{x1:.1f}", f"{y1:.1f}", f"{x2:.1f}", f"{y2:.1f}"])
 
 
 def postprocess(outputs: dict, scale_info: tuple, conf_thresh: float) -> list:
@@ -732,22 +734,27 @@ def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
 
 def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         reviews_path: Path, reviews_lock: threading.Lock, stats_monitor=None,
-        event_queue: EventQueue | None = None, notify_email: str = ""):
-    """Blocking inference loop. Intended to run in a daemon thread."""
-    global _csv_writer
+        event_queue: EventQueue | None = None, notify_email: str = "",
+        source=None, camera_name: str = "cam"):
+    """Blocking inference loop. Intended to run in a daemon thread.
 
-    source = args.source
+    One instance runs per camera; ``source``/``camera_name`` identify which feed.
+    """
+    if source is None:
+        source = args.source
     kind = _source_type(source)
 
-    # Set up CSV detection log
+    # Set up CSV detection log. Each camera thread owns its own writer; the
+    # shared _csv_lock serialises appends to the common detections.log.
     log_path = Path(args.log)
     write_header = not log_path.exists() or log_path.stat().st_size == 0
     csv_file = open(log_path, "a", newline="")
-    _csv_writer = csv.writer(csv_file)
+    csv_writer = csv.writer(csv_file)
     if write_header:
-        _csv_writer.writerow(["timestamp", "class_name", "class_id", "confidence",
-                              "x1", "y1", "x2", "y2"])
-        csv_file.flush()
+        with _csv_lock:
+            csv_writer.writerow(["timestamp", "camera", "class_name", "class_id",
+                                 "confidence", "x1", "y1", "x2", "y2"])
+            csv_file.flush()
 
     with backend:
         input_height = backend.input_height
@@ -760,7 +767,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         frame_time = 1.0 / fps
 
         label = source_label(source)
-        print(f"Source: {label} ({width}x{height} @ {fps:.2f} FPS)")
+        print(f"[{camera_name}] Source: {label} ({width}x{height} @ {fps:.2f} FPS)")
 
         # Start audio capture for RTSP sources
         audio_capture = None
@@ -797,7 +804,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
         recorder = ClipRecorder(
             clips_dir, fps, proc_w, proc_h,
             pre_roll=args.pre_roll, post_roll=args.post_roll, max_duration=args.max_clip,
-            audio_capture=audio_capture,
+            audio_capture=audio_capture, camera_name=camera_name,
         )
         tracker = Sort(max_age=5, min_hits=1, iou_threshold=0.3)
 
@@ -896,7 +903,8 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                 # Log priority-100 detections with frame-space coordinates
                 for d in detections:
                     if COCO_CLASSES.get(COCO_NAMES[int(d[5])], 0) == 100:
-                        _log_detection(COCO_NAMES[int(d[5])], int(d[5]),
+                        _log_detection(csv_writer, camera_name,
+                                       COCO_NAMES[int(d[5])], int(d[5]),
                                        d[4], d[0], d[1], d[2], d[3])
                 if detections:
                     csv_file.flush()
@@ -930,7 +938,7 @@ def run(backend, frame_buffer: FrameBuffer, stop_event: threading.Event, args,
                     best_conf = best[4]
                     if notify_email:
                         import notify
-                        notify.on_detection(best_class, best_conf, notify_email)
+                        notify.on_detection(best_class, best_conf, notify_email, camera_name)
                     clip_info = recorder.push(annotated, best_class, best_conf)
                 else:
                     clip_info = recorder.push(annotated)
