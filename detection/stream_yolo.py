@@ -84,8 +84,21 @@ def load_settings() -> SimpleNamespace:
     if not Path(model).exists():
         sys.exit(f"Error: Model file not found: {model}")
 
+    # Cameras: prefer an array of [[camera]] tables (name + url); fall back to a
+    # single [source] url for backward compatibility.
+    cam_tables = cfg.get("camera")
+    if cam_tables:
+        cameras = [
+            {"name": c.get("name", f"cam{i}"), "url": c.get("url")}
+            for i, c in enumerate(cam_tables)
+            if c.get("url")
+        ]
+    else:
+        cameras = [{"name": "cam", "url": cfg.get("source", {}).get("url", None)}]
+
     return SimpleNamespace(
-        source    = cfg.get("source", {}).get("url", None),
+        source    = cameras[0]["url"],   # primary feed (used by WebRTC)
+        cameras   = cameras,
         loop      = get("source", "loop"),
         backend      = get("model", "backend"),
         model        = model,
@@ -108,15 +121,17 @@ def load_settings() -> SimpleNamespace:
     )
 
 
-def main():
-    args = load_settings()
-
+def make_backend(args):
+    """Create a fresh inference backend instance (one per camera)."""
     if args.backend == "nvidia":
         from backend_nvidia import NvidiaBackend
-        backend = NvidiaBackend(args.model, args.conf)
-    else:
-        from backend_hailo import HailoBackend
-        backend = HailoBackend(args.model, args.batch_size, args.conf)
+        return NvidiaBackend(args.model, args.conf)
+    from backend_hailo import HailoBackend
+    return HailoBackend(args.model, args.batch_size, args.conf)
+
+
+def main():
+    args = load_settings()
 
     reviews_path = Path(args.reviews)
     reviews_lock = threading.Lock()
@@ -127,30 +142,47 @@ def main():
 
     reviews.prune(reviews_path, reviews_lock)
 
-    frame_buffer = detector.FrameBuffer()
     event_queue = detector.EventQueue()
     stats_store = stats.StatsStore()
 
+    # One independent pipeline per camera: its own backend + frame buffer +
+    # detector thread. Reviews, events, and the notify/fan cooldown are shared.
     stop_event = threading.Event()
-    det_thread = threading.Thread(
-        target=detector.run,
-        args=(backend, frame_buffer, stop_event, args, reviews_path, reviews_lock, stats_store, event_queue, args.notify_email),
-        daemon=True,
-    )
-    det_thread.start()
+    streams: dict[str, detector.FrameBuffer] = {}
+    det_threads = []
+    for i, cam in enumerate(args.cameras):
+        frame_buffer = detector.FrameBuffer()
+        streams[cam["name"]] = frame_buffer
+        # Stats reflect a single GPU; let the first camera own the stats store.
+        stats_for_cam = stats_store if i == 0 else None
+        t = threading.Thread(
+            target=detector.run,
+            args=(make_backend(args), frame_buffer, stop_event, args, reviews_path,
+                  reviews_lock, stats_for_cam, event_queue, args.notify_email),
+            kwargs={"source": cam["url"], "camera_name": cam["name"]},
+            daemon=True,
+        )
+        t.start()
+        det_threads.append(t)
+        print(f"Camera '{cam['name']}': {cam['url']}")
 
-    app = web.make_app(frame_buffer, reviews_path, reviews_lock, clips_dir, templates_dir, stats_store, event_queue)
+    primary_name = args.cameras[0]["name"]
+    primary_buffer = streams[primary_name]
+
+    app = web.make_app(streams, reviews_path, reviews_lock, clips_dir, templates_dir, stats_store, event_queue)
     app.listen(args.port, address=args.host)
 
-    print(f"Stream:  http://{args.host}:{args.port}")
+    print(f"Stream:  http://{args.host}:{args.port}          ({primary_name})")
+    for name in list(streams)[1:]:
+        print(f"Stream:  http://{args.host}:{args.port}/stream/{name}")
     print(f"Review:  http://{args.host}:{args.port}/review")
 
-    # Start WebRTC signaling client if configured
+    # Start WebRTC signaling client if configured (primary camera only)
     if args.node_signaling_url and args.node_auth_token:
         import webrtc as webrtc_mod
         ioloop = tornado.ioloop.IOLoop.current()
         ioloop.asyncio_loop.create_task(
-            webrtc_mod.run_signaling_client(frame_buffer, args)
+            webrtc_mod.run_signaling_client(primary_buffer, args)
         )
         print(f"Signaling: {args.node_signaling_url}")
     else:
@@ -164,7 +196,8 @@ def main():
         print("\nStopping...")
     finally:
         stop_event.set()
-        det_thread.join(timeout=5)
+        for t in det_threads:
+            t.join(timeout=5)
 
     print("Done")
 
