@@ -12,8 +12,11 @@ import reviews as reviews_mod
 
 
 class IndexHandler(tornado.web.RequestHandler):
+    def initialize(self, camera_names):
+        self._camera_names = camera_names
+
     def get(self):
-        self.render("index.html")
+        self.render("index.html", cameras=self._camera_names)
 
 
 class StreamHandler(tornado.web.RequestHandler):
@@ -159,7 +162,7 @@ def make_app(streams, reviews_path: Path, reviews_lock: threading.Lock,
     stream_cfg = {"streams": streams, "default_name": default_name}
     return tornado.web.Application(
         [
-            (r"/", IndexHandler),
+            (r"/", IndexHandler, {"camera_names": list(streams)}),
             (r"/stream", StreamHandler, stream_cfg),
             (r"/stream/([\w-]+)", StreamHandler, stream_cfg),
             (r"/review", ReviewHandler),
