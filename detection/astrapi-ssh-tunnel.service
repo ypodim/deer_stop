@@ -1,0 +1,24 @@
+[Unit]
+Description=Astrapi autossh reverse SSH tunnel to Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pol
+# Forwards Node:22022 → localhost:22 so you can reach astrapi's SSH from Node:
+#   ssh pol@node.polychronis.gr   then   ssh -p 22022 pol@localhost
+# (or a single hop with ProxyJump). Requires passwordless SSH to Node (key already configured).
+ExecStart=/usr/bin/autossh \
+    -M 0 \
+    -N \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -R 22022:localhost:22 \
+    pol@node.polychronis.gr
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

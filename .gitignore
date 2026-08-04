@@ -16,3 +16,10 @@ one.py
 __pycache__/
 *.pyc
 deer.mp4
+.venv/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
