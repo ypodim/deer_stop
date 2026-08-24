@@ -2,6 +2,10 @@
 Description=Deerstop wildlife camera detection
 After=network-online.target
 Wants=network-online.target
+# The interpreter, venv, and model live on the external /media/pol/pond disk.
+# Ensure that mount is ready before starting (systemd does not infer this from
+# the ExecStart path), otherwise a cold boot can race the mount and fail.
+RequiresMountsFor=/media/pol/pond
 
 [Service]
 Type=simple
