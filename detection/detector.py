@@ -250,7 +250,7 @@ COCO_CLASSES = {
     "bench": 0,
     "bird": 1,
     "cat": 1,
-    "dog": 100,
+    "dog": 1,
     "horse": 1,
     "sheep": 100,
     "cow": 100,
